@@ -1,0 +1,8 @@
+Athena Firewall - Modern Design, Extra Privacy
+
+Features:
+• 📝 Root/VPN Mode
+• 🌟 Material3, Minimalistic Design
+• 🔒 DNS Blocklist (categories,custom)
+• 🚀 Logs 
+• 🔐 Notify on install
