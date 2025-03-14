@@ -2,28 +2,23 @@
 
 <div align="center">
 <img width="192" height="192" src="metadata/en-US/images/icon.png" align="center" alt="">
-
+</div>
 <br></br>
 
-
-
-# Athena 
-Root/VPN Support • Material3 • Minimalism
-
---- 
-
-
-&nbsp;
-
-</div>
-<div align="left">
-
 <div align="center">
-    <img src="metadata/en-US/images/phoneScreenshots/1.png" width="30%"  alt=""/>
-    <img src="metadata/en-US/images/phoneScreenshots/2.png" width="30%"  alt=""/>
-    <img src="metadata/en-US/images/phoneScreenshots/3.png" width="30%"  alt=""/>
+    <h1>Athena</h1>
+    <p>An Android Firewall presented in <a target="_blank" href="https://m3.material.io/">Material You</a> style.</p>
+    <br/>
+    <img src="metadata/en-US/images/phoneScreenshots/1.png" width="19.2%" alt="startup" />&nbsp;
+    <img src="metadata/en-US/images/phoneScreenshots/2.png" width="19.2%" alt="feeds" />&nbsp;
+    <img src="metadata/en-US/images/phoneScreenshots/3.png" width="19.2%" alt="startup" />&nbsp;&nbsp;
+    <img src="metadata/en-US/images/phoneScreenshots/4.png" width="19.2%" alt="feeds" />&nbsp;
+    <img src="metadata/en-US/images/phoneScreenshots/5.png" width="19.2%" alt="startup" />&nbsp;
 </div>
-</div>
+
+
+
+
 
 &nbsp;
 
@@ -34,8 +29,8 @@ Athena gives you complete control over your network activity. You can block mali
 
 ## Download
 
-
 [<img src=".github/play_store.png" alt="Get it on F-Droid" height="55">](https://play.google.com/store/apps/details?id=com.kin.athena) &nbsp;
+
 
 &nbsp;
 
