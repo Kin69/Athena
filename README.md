@@ -13,7 +13,6 @@
     <img src="metadata/en-US/images/phoneScreenshots/2.png" width="19.2%" alt="feeds" />&nbsp;
     <img src="metadata/en-US/images/phoneScreenshots/3.png" width="19.2%" alt="startup" />&nbsp;&nbsp;
     <img src="metadata/en-US/images/phoneScreenshots/4.png" width="19.2%" alt="feeds" />&nbsp;
-    <img src="metadata/en-US/images/phoneScreenshots/5.png" width="19.2%" alt="startup" />&nbsp;
 </div>
 
 
