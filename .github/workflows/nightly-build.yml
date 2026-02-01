@@ -79,7 +79,7 @@ jobs:
           echo "- Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> nightly-changelog.txt
 
       - name: Upload the APK
-        uses: actions/upload-artifact@v4.6.0
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: Athena-Nightly
           path: Athena-nightly.apk
