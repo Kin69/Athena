@@ -326,4 +326,7 @@
     <string name="backup_option_blocklists">Listes de blocage</string>
     <string name="backup_option_applications">Règles d\'applications</string>
     <string name="magisk_title">Module Magisk</string>
+    <string name="vpn_local_network_note">En mode VPN, Android vous demandera aussi l\'accès aux appareils à proximité. Athena l\'utilise uniquement pour que les applis accèdent à votre réseau local, comme votre routeur.</string>
+    <string name="vpn_only_description">Athena a besoin de l\'autorisation d\'utiliser un VPN pour filtrer votre trafic réseau.</string>
+    <string name="vpn_only_description_local_network">Athena a besoin de l\'autorisation d\'utiliser un VPN pour filtrer votre trafic réseau, et d\'accéder aux appareils à proximité pour que les applis puissent toujours atteindre votre réseau local, comme votre routeur.</string>
 </resources>

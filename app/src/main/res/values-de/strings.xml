@@ -314,4 +314,7 @@
     <string name="backup_export_failed">Sicherungswiederherstellung fehlgeschlagen: %s</string>
     <string name="backup_import_success">Sicherung erfolgreich wiederhergestellt</string>
     <string name="backup_import_failed">Sicherungswiederherstellung fehlgeschlagen: %s</string>
+    <string name="vpn_local_network_note">Im VPN-Modus fragt Android außerdem nach Geräten in der Nähe. Athena nutzt das nur, damit Apps dein lokales Netzwerk erreichen können, z. B. deinen Router.</string>
+    <string name="vpn_only_description">Athena benötigt die Berechtigung, ein VPN zu verwenden, um deinen Netzwerkverkehr zu filtern.</string>
+    <string name="vpn_only_description_local_network">Athena benötigt die Berechtigung, ein VPN zu verwenden, um deinen Netzwerkverkehr zu filtern, und Zugriff auf Geräte in der Nähe, damit Apps weiterhin dein lokales Netzwerk erreichen können, z. B. deinen Router.</string>
 </resources>

@@ -287,4 +287,7 @@
     <string name="backup_option_applications">Reglas de App</string>
     <string name="colors_amoled_desc">Fondo en blanco puro</string>
     <string name="colors_system_language">Idioma de sistema</string>
+    <string name="vpn_local_network_note">En el modo VPN, Android también te preguntará por los dispositivos cercanos. Athena solo lo usa para que las apps puedan acceder a tu red local, como tu router.</string>
+    <string name="vpn_only_description">Athena necesita permiso para usar una VPN y filtrar tu tráfico de red.</string>
+    <string name="vpn_only_description_local_network">Athena necesita permiso para usar una VPN y filtrar tu tráfico de red, y para acceder a los dispositivos cercanos, de modo que las apps puedan seguir accediendo a tu red local, como tu router.</string>
 </resources>

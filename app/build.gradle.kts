@@ -1,7 +1,6 @@
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.jetbrains.kotlin.android)
     alias(libs.plugins.ksp)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.hilt)
@@ -9,14 +8,20 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+val athenaNdkVersion = providers.gradleProperty("athena.ndkVersion").getOrElse("30.0.16248370")
+
 android {
     namespace = "com.kin.athena"
-    compileSdk = 36
+    compileSdk = 37
+    compileSdkMinor = 1
+
+    buildToolsVersion = "37.0.0"
+    ndkVersion = athenaNdkVersion
 
     defaultConfig {
         applicationId = "com.kin.athena"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 306
         versionName = "1.80"
 
@@ -60,6 +65,13 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
         debug {
+            /* Its own package id, so a debug build installs ALONGSIDE whatever
+               release/store build is already on the device rather than trying to
+               replace it. Without this, installing fails with
+               INSTALL_FAILED_UPDATE_INCOMPATIBLE (different signing key), and
+               the only way through is to uninstall -- which takes the user's
+               firewall rules and settings with it. */
+            applicationIdSuffix = ".debug"
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(
@@ -80,18 +92,14 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlin {
-        compilerOptions {
-            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-        }
-    }
     buildFeatures {
         compose = true
         buildConfig = true
         aidl = true
     }
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.1"
+    testOptions {
+        // AGP 9's Compose Preview task refuses to configure without this.
+        unitTests.isIncludeAndroidResources = true
     }
     packaging {
         resources {
@@ -106,7 +114,7 @@ android {
     }
     sourceSets {
         getByName("main") {
-            jniLibs.srcDirs("libs/")
+            jniLibs.directories.add("libs/")
         }
     }
     
@@ -125,6 +133,7 @@ android {
         outputs.upToDateWhen { false }
         
         workingDir(goDir)
+        environment("NDK_VERSION", athenaNdkVersion)
         
         val isWindows = org.gradle.internal.os.OperatingSystem.current().isWindows
         val buildScript = if (isWindows) "build-android.bat" else "build-android.sh"
@@ -152,7 +161,13 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
+            /* No version pin. It used to request 3.22.1, which resolves to the
+               SDK's own bundled copy -- and that copy is x86-64, so it died with
+               exit 126 here. local.properties now points cmake.dir at the
+               system CMake, which is ARM-native; naming a version as well would
+               send AGP back to the SDK looking for an exact match it cannot
+               run. CMakeLists.txt asks for >= 3.22.1 and the system CMake is
+               4.4.3, so the requirement is still satisfied. */
         }
     }
     packaging {
@@ -178,6 +193,7 @@ dependencies {
     implementation(libs.androidx.room.ktx)
 
     // Compose
+    implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.navigation.compose)
