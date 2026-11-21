@@ -26,14 +26,19 @@ import kotlinx.coroutines.flow.first
 import com.kin.athena.domain.model.Settings
 import com.kin.athena.domain.repository.SettingsRepository
 import kotlinx.coroutines.flow.map
+import java.lang.reflect.Modifier
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(AppConstants.DatabaseConstants.SETTINGS_DATABASE_NAME)
+
+// Skips the compiler's static final fields, such as Compose's $stable. Writing one
+// by reflection throws IllegalAccessException when targeting Android 17.
+private val settingsFields = Settings::class.java.declaredFields.filterNot { Modifier.isStatic(it.modifiers) }
 
 class SettingsRepositoryImpl(private val context: Context) : SettingsRepository {
 
     override suspend fun saveSettings(settings: Settings) {
         context.dataStore.edit { preferences ->
-            Settings::class.java.declaredFields.forEach { field ->
+            settingsFields.forEach { field ->
                 field.isAccessible = true
                 val key = field.name
                 when (val value = field.get(settings)) {
@@ -53,7 +58,7 @@ class SettingsRepositoryImpl(private val context: Context) : SettingsRepository 
         val preferences = context.dataStore.data.first()
         val settings = Settings()
 
-        Settings::class.java.declaredFields.forEach { field ->
+        settingsFields.forEach { field ->
             field.isAccessible = true
             val key = field.name
             val value = when {

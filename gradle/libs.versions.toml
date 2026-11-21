@@ -1,32 +1,33 @@
 [versions]
-agp = "8.12.0-rc01"
-atomicfu = "0.29.0"
-billing = "8.0.0"
-biometric = "1.2.0-alpha05"
-datastorePreferences = "1.1.7"
-dnsjava = "3.6.3"
-hilt = "2.57"
-hiltCompiler = "1.2.0"
-hiltAndroidCompiler = "2.57"
-hiltNavigationCompose = "1.2.0"
-kotlin = "2.2.0"
-kotlinxSerializationJson = "1.9.0"
-ksp = "2.2.0-2.0.2"
+agp = "9.5.2"
+atomicfu = "0.33.0"
+billing = "9.1.0"
+biometric = "1.4.0-rc01"
+datastorePreferences = "1.3.0"
+dnsjava = "3.7.1"
+hilt = "2.60.1"
+hiltCompiler = "1.4.0"
+hiltAndroidCompiler = "2.60.1"
+hiltNavigationCompose = "1.4.0"
+kotlin = "2.4.21"
+kotlinxSerializationJson = "1.13.0"
+ksp = "2.3.14"
 pcap4jCore = "1.8.2"
 retrofit = "3.0.0"
 shizuku-api = "13.1.5"
 shizuku-provider = "13.1.5"
-room = "2.7.2"
-activityCompose = "1.10.1"
-coreKtx = "1.16.0"
-coreSplashscreen = "1.0.1"
+room = "2.8.5"
+activityCompose = "1.13.0"
+coreKtx = "1.19.1"
+coreSplashscreen = "1.2.0"
 compose = "1.7.8"
-material3 = "1.3.2"
-navigationCompose = "2.9.2"
-appcompat = "1.7.1"
-workRuntimeKtx = "2.10.2"
-hiltCommon = "1.2.0"
-m3color = "2024.6"
+composeBom = "2026.11.01"
+material3 = "1.5.0"
+navigationCompose = "2.10.2"
+appcompat = "1.8.0"
+workRuntimeKtx = "2.12.0"
+hiltCommon = "1.4.0"
+m3color = "2026.1"
 
 [libraries]
 # DataStore
@@ -43,6 +44,7 @@ androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx"
 androidx-core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "coreSplashscreen" }
 
 # Compose
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
 androidx-compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended", version.ref = "compose" }
 androidx-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
@@ -67,6 +69,9 @@ shizuku-provider = { module = "dev.rikka.shizuku:provider", version.ref = "shizu
 androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "workRuntimeKtx" }
 androidx-hilt-common = { group = "androidx.hilt", name = "hilt-common", version.ref = "hiltCommon" }
 
+# AGP 9 bundles an older Kotlin Gradle plugin; this classpath entry raises it.
+kotlin-gradle-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
+
 # M3Color | https://github.com/Kyant0/m3color
 m3color = { module = "com.github.Kyant0:m3color", version.ref = "m3color" }
 
@@ -74,7 +79,6 @@ m3color = { module = "com.github.Kyant0:m3color", version.ref = "m3color" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
 compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 android-application = { id = "com.android.application", version.ref = "agp" }
-jetbrains-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 kotlin-parcelize = { id = "org.jetbrains.kotlin.plugin.parcelize", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
