@@ -66,16 +66,29 @@ fun ComprehensivePermissionModal(
         }
     }
     
-    val vpnLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        // VPN permission handled, now request notification if needed
+    fun requestNotificationsAfterVpn() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             // Skip notification request on older versions
             context.requestDisableBatteryOptimization()
             onPermissionsComplete(true, false) // VPN method
+        }
+    }
+
+    val localNetworkLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { requestNotificationsAfterVpn() }
+
+    val vpnLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        // VPN mode forwards every app's traffic through this app's own sockets, so on
+        // Android 17 LAN connections fail for all of them until this is granted.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
+            localNetworkLauncher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+        } else {
+            requestNotificationsAfterVpn()
         }
     }
     
@@ -206,8 +219,16 @@ private fun VpnMethodSelection(
             fontWeight = FontWeight.Bold
         )
         Spacer(modifier = Modifier.height(16.dp))
+        val hasLocalNetworkPrompt = Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN
+        val isVpnTheOnlyMethod = !isRooted && !isShizukuAvailable
+        val description = stringResource(R.string.vpn_permission_description)
         Text(
-            text = stringResource(R.string.vpn_permission_description),
+            text = when {
+                isVpnTheOnlyMethod && hasLocalNetworkPrompt -> stringResource(R.string.vpn_only_description_local_network)
+                isVpnTheOnlyMethod -> stringResource(R.string.vpn_only_description)
+                hasLocalNetworkPrompt -> "${description.trimEnd('.')}. ${stringResource(R.string.vpn_local_network_note)}"
+                else -> description
+            },
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -223,7 +244,7 @@ private fun VpnMethodSelection(
                 fontWeight = FontWeight.Bold
             )
         }
-        
+
         if (isRooted) {
             Spacer(modifier = Modifier.height(8.dp))
             

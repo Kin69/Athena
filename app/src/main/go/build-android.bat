@@ -5,7 +5,7 @@ REM This script compiles the Go code for Android arm64-v8a and armeabi-v7a archi
 setlocal enabledelayedexpansion
 
 REM Configuration
-set NDK_VERSION=27.0.12077973
+if not defined NDK_VERSION set NDK_VERSION=30.0.16248370
 if "%ANDROID_HOME%"=="" set ANDROID_HOME=%USERPROFILE%\AppData\Local\Android\Sdk
 set NDK=%ANDROID_HOME%\ndk\%NDK_VERSION%
 

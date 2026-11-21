@@ -327,4 +327,7 @@
     <string name="backup_option_domains">Custom Domains</string>
     <string name="backup_option_blocklists">Blocklists</string>
     <string name="backup_option_applications">App Rules</string>
+    <string name="vpn_local_network_note">In VPN mode, Android will also ask about nearby devices. Athena only uses this so apps can reach your local network, like your router.</string>
+    <string name="vpn_only_description">Athena needs permission to use a VPN to filter your network traffic.</string>
+    <string name="vpn_only_description_local_network">Athena needs permission to use a VPN to filter your network traffic, and to access nearby devices so apps can still reach your local network, like your router.</string>
 </resources>

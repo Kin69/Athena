@@ -17,6 +17,12 @@
 
 package com.kin.athena.presentation.screens.home
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
@@ -541,8 +547,10 @@ private fun ProfessionalApplicationList(
                         EnterTransition.None
                     },
                     exit = ExitTransition.None,
-                    modifier = Modifier.animateItemPlacement(
-                        animationSpec = spring(
+                    modifier = Modifier.animateItem(
+                        fadeInSpec = null,
+                        fadeOutSpec = null,
+                        placementSpec = spring(
                             dampingRatio = Spring.DampingRatioNoBouncy,
                             stiffness = Spring.StiffnessMediumLow
                         )
@@ -737,12 +745,28 @@ private fun getAccessControlTint(isAccessEnabled: Boolean): Color {
 private fun HandleComprehensivePermissions(homeViewModel: HomeViewModel, context: Context, settingsViewModel: SettingsViewModel, isFirewallManager: FirewallStatus) {
     val comprehensiveSheetState = rememberModalBottomSheetState()
     val scope = rememberCoroutineScope()
+    val settings = settingsViewModel.settings.value
+
+    var askedByPermissionModal by remember { mutableStateOf(false) }
+    val localNetworkLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    LaunchedEffect(isFirewallManager, settings.useRootMode, settings.useShizukuMode) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN &&
+            !askedByPermissionModal &&
+            isFirewallManager == FirewallStatus.ONLINE &&
+            settings.useRootMode != true &&
+            settings.useShizukuMode != true &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_LOCAL_NETWORK) != PackageManager.PERMISSION_GRANTED
+        ) {
+            localNetworkLauncher.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+        }
+    }
 
     if (homeViewModel.vpnPermissionRequested.value && isFirewallManager != FirewallStatus.ONLINE) {
         ComprehensivePermissionModal(
             context = context,
             sheetState = comprehensiveSheetState,
             onPermissionsComplete = { useVpn, useShizuku ->
+                askedByPermissionModal = true
                 // Update settings based on selected method
                 settingsViewModel.update(
                     settingsViewModel.settings.value.copy(
