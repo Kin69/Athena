@@ -74,6 +74,7 @@ args->fwd53 = fwd53;
 args->rcode = rcode;
 args->ctx = ctx;
 handle_events(args);
+current_tun_fd = -1;  // The tunnel is closed after this, its fd number can be reused by any other file
 }
 
 JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni_1stop(JNIEnv *env, jobject instance, jlong context) {
@@ -132,7 +133,21 @@ JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni
         return;
     }
 
-    log_android(ANDROID_LOG_INFO, "Clearing all active sessions");
+    // Tell the apps their connections are gone before freeing them. Without an RST an idle connection
+    // (push, chat) still looks alive to the app and hangs until the app itself sends something, which for
+    // Play services' push connection is its next heartbeat, often 10+ minutes after a network change.
+    // Sessions still in LISTEN are left alone: the app retransmits the SYN and gets a new session.
+    int reset = 0;
+    if (current_tun_fd >= 0) {
+        struct arguments rst_args = {.env = env, .instance = instance, .tun = current_tun_fd, .ctx = ctx};
+        for (struct ng_session *s = ctx->ng_session; s != NULL; s = s->next)
+            if (s->protocol == IPPROTO_TCP && s->tcp.state != TCP_LISTEN &&
+                s->tcp.state != TCP_CLOSING && s->tcp.state != TCP_CLOSE) {
+                write_rst(&rst_args, &s->tcp);
+                reset++;
+            }
+    }
+    log_android(ANDROID_LOG_INFO, "Clearing all active sessions, reset %d TCP connections", reset);
 
     // Clear all sessions
     clear(ctx);
