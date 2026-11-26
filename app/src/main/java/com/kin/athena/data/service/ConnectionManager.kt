@@ -21,10 +21,13 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.SystemClock
+import androidx.annotation.RequiresApi
 import com.kin.athena.core.logging.Logger
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -34,46 +37,54 @@ import javax.inject.Singleton
 /**
  * Follows the underlying network of the VPN: the system's default network, never a VPN.
  *
- * Athena is excluded from its own VPN (VpnConnectionClient disallows its own package), so its default network
- * callback reports the real default network (Wi-Fi, mobile data, ...), the one its upstream sockets use. Each real
- * change of that network (another Network or another transport) is handled once, as it happens:
+ * Not registerDefaultNetworkCallback: an app's default-network request has no NOT_VPN, and Android lets a VPN satisfy
+ * the requests of the app that owns it even when the VPN excludes that app (NetworkCapabilities.satisfiedByUids), so
+ * that callback reports Athena's own VPN (seen on Android 10, 13 and 17). The callback here asks for NOT_VPN networks
+ * only and follows the system default among them, the network Athena's upstream sockets use. Each real change of
+ * that network (another Network or another rule type) is handled once, as it happens:
  * - the network type for the per-app rules changes at once,
- * - the old network is gone (Wi-Fi off or out of range): the [Listener] resets all connections at once,
- * - another network became the default while the old one is still up (back on Wi-Fi from mobile data): the
- *   [Listener] keeps the sessions and only resets the apps blocked on the new network type,
+ * - the old network is gone, or no longer validated (Wi-Fi off, out of range, weak Wi-Fi left behind): the
+ *   [Listener] resets all connections,
+ * - another network became the default while the old one still works (back on Wi-Fi from mobile data): the
+ *   [Listener] resets the connections opened before the change (they run on the old network, which Android stops
+ *   using) and those of the apps blocked on the new network type, and keeps the rest,
  * - the [UnderlyingNetworkObserver] (the VpnService) sets the VPN's underlying network.
- * The initial event of the callback and repeated events for the same network (signal strength, bandwidth,
- * validation) change nothing.
+ * The initial event of the callback and repeated events for the same network (signal strength, bandwidth) change
+ * nothing.
+ *
+ * All state lives on one background thread ([handler]), so a busy main thread cannot delay a change.
  */
 @Singleton
 class ConnectionStateManager @Inject constructor(
     @ApplicationContext var context: Context,
     var networkManager: NetworkManager
 ) {
-    /** The running tunnel (VpnConnectionServer). Called on the main thread. */
+    /** The running tunnel (VpnConnectionServer). Called on the network thread. */
     interface Listener {
-        /** The default network [lost] is gone, so all connections through it are dead. */
+        /** The default network [lost] is gone (or no longer works), so all connections through it are dead. */
         fun onUnderlyingNetworkLost(lost: Network)
 
         /**
-         * [network] of [type] became the default network while [previous] (null: there was none) is still up.
-         * Connections on [previous] keep working.
+         * [network] of [type] became the default network at [changedAt] (SystemClock.uptimeMillis) while [previous]
+         * still works. [previous] is null when there was no network, or when only the type of [network] changed.
          */
-        fun onUnderlyingNetworkSwitched(previous: Network?, network: Network, type: NetworkManager.ConnectionType)
+        fun onUnderlyingNetworkSwitched(previous: Network?, network: Network, type: NetworkManager.ConnectionType, changedAt: Long)
     }
 
-    /** The VpnService that established the VPN. Called on the main thread, at once on every change. */
+    /** The VpnService that established the VPN. Called on the network thread, at once on every change. */
     interface UnderlyingNetworkObserver {
         fun onUnderlyingNetwork(network: Network?)
     }
 
-    private val handler = Handler(Looper.getMainLooper())
+    private val handler = Handler(HandlerThread("AthenaNetwork").apply { start() }.looper)
 
-    // Read for every packet on the tunnel thread. Everything else is used on the main thread only.
+    // Read for every packet on the tunnel thread. Everything else is used on the network thread only.
     @Volatile
     private var currentConnectionType: NetworkManager.ConnectionType = networkManager.getCurrentConnectionType()
 
     private var underlyingNetwork: Network? = null
+    // The VPN was told underlyingNetwork. Until the first callback event it is told null (follow the default).
+    private var underlyingDeclared = false
     // SystemClock.uptimeMillis() of the last change of the underlying network
     private var changedAt = 0L
     private var listener: Listener? = null
@@ -93,31 +104,35 @@ class ConnectionStateManager @Inject constructor(
     }
 
     /** Starts following the default network for a running tunnel. Its sessions start on the current network. */
-    fun start(listener: Listener) = onMain {
-        this.listener = listener
+    fun start(listener: Listener) {
+        // The rules get the current type before the first packet, the rest happens on the network thread
         val network = networkManager.getDefaultNetwork()
         val type = if (network == null) NetworkManager.ConnectionType.NONE else networkManager.getConnectionType(networkManager.getCapabilities(network))
-        underlyingNetwork = network
         currentConnectionType = type
-        changedAt = SystemClock.uptimeMillis()
-        dnsUnanswered = 0
-        Logger.debug { "[Conn] Tunnel started on default network $network ($type)" }
-        if (networkCallback == null) watchDefaultNetwork()
-        observer?.let { observer ->
-            Logger.debug { "[Conn] Telling the VPN its underlying network $network (tunnel start)" }
-            observer.onUnderlyingNetwork(network)
+        onHandler {
+            this.listener = listener
+            underlyingNetwork = network
+            underlyingDeclared = false
+            changedAt = SystemClock.uptimeMillis()
+            dnsUnanswered = 0
+            Logger.debug { "[Conn] Tunnel started on default network $network ($type)" }
+            if (networkCallback == null) watchDefaultNetwork()
+            // Not the start network yet: until the callback confirms it, the VPN follows the default network
+            setUnderlyingNetwork(null, "tunnel start, until the first callback event")
         }
     }
 
     /** Stops following the default network when the tunnel of [listener] stops. Safe from any thread. */
-    fun stop(listener: Listener) = onMain {
+    fun stop(listener: Listener) = onHandler {
         // A tunnel that was started again in the meantime has its own listener and keeps the callback
         if (this.listener !== listener) {
             Logger.debug { "[Conn] Ignoring stop from a previous tunnel" }
-            return@onMain
+            return@onHandler
         }
         this.listener = null
         underlyingNetwork = null
+        underlyingDeclared = false
+        handler.removeCallbacksAndMessages(RECHECK_TOKEN)
         networkCallback?.let { callback ->
             try {
                 context.getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(callback)
@@ -130,12 +145,12 @@ class ConnectionStateManager @Inject constructor(
     }
 
     /** Adds the VpnService that established the VPN. While a tunnel runs, it is told the current network at once. */
-    fun addUnderlyingNetworkObserver(observer: UnderlyingNetworkObserver) = onMain {
+    fun addUnderlyingNetworkObserver(observer: UnderlyingNetworkObserver) = onHandler {
         this.observer = observer
-        if (listener != null) observer.onUnderlyingNetwork(underlyingNetwork)
+        if (listener != null) observer.onUnderlyingNetwork(if (underlyingDeclared) underlyingNetwork else null)
     }
 
-    fun removeUnderlyingNetworkObserver(observer: UnderlyingNetworkObserver) = onMain {
+    fun removeUnderlyingNetworkObserver(observer: UnderlyingNetworkObserver) = onHandler {
         if (this.observer === observer) this.observer = null
     }
 
@@ -200,38 +215,61 @@ class ConnectionStateManager @Inject constructor(
     }
 
     /**
-     * Follows the default network with a NetworkCallback instead of the deprecated CONNECTIVITY_ACTION, which comes
-     * twice per switch, late (after the apps already handled the change), and once more as a sticky broadcast when
-     * the receiver is registered. Athena is excluded from its own VPN, so its default network is never the VPN.
+     * Follows the underlying default network with a NetworkCallback instead of the deprecated CONNECTIVITY_ACTION,
+     * which comes twice per switch, late (after the apps already handled the change), and once more as a sticky
+     * broadcast when the receiver is registered.
+     * - API 31+: registerBestMatchingNetworkCallback for INTERNET + NOT_VPN. Android picks the best match the same
+     *   way it picks the default network, so this follows the system default.
+     * - API 24-30: registerNetworkCallback for INTERNET + NOT_VPN keeps every real network. The default among them
+     *   is Athena's activeNetwork (correct for an app excluded from the VPN), checked again [RECHECK_MS] after each
+     *   event because the active network can change just after the callback ([NetworkManager.pickUnderlying]).
      */
     private fun watchDefaultNetwork() {
         val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
-        val callback = DefaultNetworkCallback()
+        // NetworkRequest.Builder already requires NOT_RESTRICTED, TRUSTED and NOT_VPN; added explicitly for clarity
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
         try {
             if (connectivityManager == null) throw IllegalStateException("No ConnectivityManager")
             // The first event is the current default network, which start() already has
             initialEventPending = true
-            networkCallback = callback
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                connectivityManager.registerDefaultNetworkCallback(callback, handler)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val callback = BestNetworkCallback()
+                networkCallback = callback
+                connectivityManager.registerBestMatchingNetworkCallback(request, callback, handler)
             } else {
-                connectivityManager.registerDefaultNetworkCallback(callback)
+                val callback = AllNetworksCallback()
+                networkCallback = callback
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    connectivityManager.registerNetworkCallback(request, callback, handler)
+                } else {
+                    connectivityManager.registerNetworkCallback(request, callback)
+                }
             }
-            Logger.debug { "[Conn] Watching the default network with a NetworkCallback" }
+            Logger.debug { "[Conn] Watching the underlying default network with a NOT_VPN NetworkCallback (${networkCallback?.javaClass?.simpleName})" }
         } catch (e: RuntimeException) {
             networkCallback = null
-            Logger.error("ConnectionStateManager: Cannot register the default network callback: ${e.message}", e)
+            // The VPN stays on null underlying networks, which follows the default network by itself
+            Logger.error("ConnectionStateManager: Cannot register the network callback, the rules keep the start network type: ${e.message}", e)
         }
     }
 
-    // Main thread only. onAvailable or onCapabilitiesChanged of the default network.
-    private fun onDefaultNetwork(network: Network, capabilities: NetworkCapabilities?, event: String) {
+    // Network thread only. The callback's current default network and its capabilities.
+    // [previousGone]: the callback already knows the previous network disconnected (API 24-30 onLost).
+    private fun onDefaultNetwork(network: Network, capabilities: NetworkCapabilities?, event: String, previousGone: Boolean = false) {
         val caps = capabilities ?: networkManager.getCapabilities(network)
-        if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) {
-            Logger.debug { "[Conn] $event: ignoring VPN network $network" }
+        if (caps == null) {
+            // Gone already, or not known yet: onCapabilitiesChanged or onLost follows
+            Logger.debug { "[Conn] $event $network without capabilities, waiting for the next event" }
             return
         }
-        val type = if (caps == null) NetworkManager.ConnectionType.NONE else networkManager.getConnectionType(caps)
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+            Logger.warn("ConnectionStateManager: $event delivered VPN network $network to a NOT_VPN callback, ignored")
+            return
+        }
+        val type = networkManager.getConnectionType(caps)
         val previous = underlyingNetwork
         val previousType = currentConnectionType
         val initial = initialEventPending
@@ -239,10 +277,11 @@ class ConnectionStateManager @Inject constructor(
 
         if (network == previous && type == previousType) {
             if (initial) {
-                Logger.debug { "[Conn] $event $network ($type): kind=initial, the network the tunnel started on, nothing to do" }
+                Logger.debug { "[Conn] Underlying default network $network ${networkManager.describe(caps)} (initial: the network the tunnel started on) by $event" }
             } else if (event == "onAvailable" || sameNetworkLog.shouldLog(network)) {
-                Logger.debug { "[Conn] $event $network ($type): kind=same, nothing to do" }
+                Logger.debug { "[Conn] Underlying default network $network ${networkManager.describe(caps)} (same) by $event" }
             }
+            if (!underlyingDeclared) setUnderlyingNetwork(network, "first callback event")
             return
         }
 
@@ -253,25 +292,33 @@ class ConnectionStateManager @Inject constructor(
         dnsUnanswered = 0
 
         val listener = listener
-        if (previous != null && previous != network && networkManager.getCapabilities(previous) == null) {
-            // The old network went away without onLost (it is handled like onLost)
-            Logger.debug { "[Conn] $event $network ($previousType->$type): kind=lost, previous $previous is gone" }
+        val previousCaps = if (previous != null && previous != network && !previousGone) networkManager.getCapabilities(previous) else null
+        val previousWorks = previousCaps != null &&
+            previousCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            previousCaps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        if (previous != null && previous != network && !previousWorks) {
+            // The old network went away, or Android left it because it stopped working (weak Wi-Fi): every
+            // connection on it is dead
+            val why = if (previousCaps == null) "gone" else "still connected but ${networkManager.describe(previousCaps)}"
+            Logger.debug { "[Conn] Underlying default network $network ${networkManager.describe(caps)} (lost: previous $previous $why, $previousType->$type) by $event" }
             listener?.onUnderlyingNetworkLost(previous)
         } else {
+            val from = if (previous != null && previous != network) previous else null
             Logger.debug {
-                "[Conn] $event $network ($previousType->$type): kind=switch from ${previous ?: "none"}" +
-                    "${if (previous != null && previous != network) " (still up)" else ""}${if (initial) ", first event of the callback" else ""}"
+                "[Conn] Underlying default network $network ${networkManager.describe(caps)} (switch: from " +
+                    "${if (from != null) "$from ${networkManager.describe(previousCaps)} still up" else if (previous == null) "none" else "the same network"}" +
+                    ", $previousType->$type${if (initial) ", first event of the callback" else ""}) by $event"
             }
-            listener?.onUnderlyingNetworkSwitched(previous, network, type)
+            listener?.onUnderlyingNetworkSwitched(from, network, type, changedAt)
         }
-        setUnderlyingNetwork(network)
+        setUnderlyingNetwork(network, "change")
     }
 
-    // Main thread only
+    // Network thread only
     private fun onDefaultNetworkLost(network: Network) {
         initialEventPending = false
         if (network != underlyingNetwork) {
-            Logger.debug { "[Conn] onLost $network: kind=same, not the current default ${underlyingNetwork ?: "none"}" }
+            Logger.debug { "[Conn] Underlying default network ${underlyingNetwork ?: "none"} (same: $network lost, not the default)" }
             return
         }
         val previousType = currentConnectionType
@@ -280,49 +327,93 @@ class ConnectionStateManager @Inject constructor(
         underlyingNetwork = null
         changedAt = SystemClock.uptimeMillis()
         dnsUnanswered = 0
-        Logger.debug { "[Conn] onLost $network ($previousType->NONE): kind=lost, no default network now" }
-        // Reset before the VPN's underlying network changes below: the apps get the RST before Android tells them
-        // about the change, and reconnect right away
+        Logger.debug { "[Conn] Underlying default network none (lost: $network is gone, $previousType->NONE)" }
         listener?.onUnderlyingNetworkLost(network)
-        setUnderlyingNetwork(null)
+        setUnderlyingNetwork(null, "no network")
     }
 
-    // Main thread only
-    private fun setUnderlyingNetwork(network: Network?) {
+    // Network thread only
+    private fun setUnderlyingNetwork(network: Network?, why: String) {
+        underlyingDeclared = network != null || why == "no network"
         val observer = observer
         if (observer == null) {
-            Logger.debug { "[Conn] No VPN to tell its underlying network $network" }
+            Logger.debug { "[Conn] No VPN to tell its underlying network $network ($why)" }
             return
         }
+        Logger.debug { "[Conn] Telling the VPN its underlying network $network ($why)" }
         observer.onUnderlyingNetwork(network)
     }
 
-    private fun onMain(block: () -> Unit) {
-        if (Looper.myLooper() == Looper.getMainLooper()) block() else handler.post(block)
+    private fun onHandler(block: () -> Unit) {
+        if (Looper.myLooper() == handler.looper) block() else handler.post(block)
     }
 
-    /**
-     * Events come on the main thread (API 26+: registered with the main handler; API 24-25: handed over here, in
-     * order). Events of a callback that was unregistered in the meantime are dropped.
-     */
-    private inner class DefaultNetworkCallback : ConnectivityManager.NetworkCallback() {
+    /** API 31+: events come on the network thread (registered with [handler]). */
+    @RequiresApi(Build.VERSION_CODES.S)
+    private inner class BestNetworkCallback : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            // Android 7 does not always follow onAvailable with onCapabilitiesChanged
-            onMainIfCurrent { onDefaultNetwork(network, null, "onAvailable") }
+            if (networkCallback === this) onDefaultNetwork(network, null, "onAvailable")
         }
 
         override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-            onMainIfCurrent { onDefaultNetwork(network, networkCapabilities, "onCapabilitiesChanged") }
+            if (networkCallback === this) onDefaultNetwork(network, networkCapabilities, "onCapabilitiesChanged")
         }
 
         override fun onLost(network: Network) {
-            // Only when no network is the default anymore. Another network that becomes the default comes as
-            // onAvailable.
-            onMainIfCurrent { onDefaultNetworkLost(network) }
+            // Only when no network matches anymore. Another network taking over comes as onAvailable.
+            if (networkCallback === this) onDefaultNetworkLost(network)
+        }
+    }
+
+    /**
+     * API 24-30: there is no best matching callback, so this keeps every real network and picks the underlying
+     * default itself, see [NetworkManager.pickUnderlying]. Events come on the network thread (API 26+) or are handed
+     * to it in order (API 24-25).
+     */
+    private inner class AllNetworksCallback : ConnectivityManager.NetworkCallback() {
+        // Network thread only
+        private val networks = HashMap<Network, NetworkCapabilities>()
+
+        override fun onAvailable(network: Network) {
+            // Android 7 does not always follow onAvailable with onCapabilitiesChanged
+            val caps = networkManager.getCapabilities(network)
+            onHandlerIfCurrent {
+                if (caps != null) networks[network] = caps
+                update("onAvailable", gone = null)
+            }
         }
 
-        private fun onMainIfCurrent(block: () -> Unit) {
-            onMain { if (networkCallback === this) block() }
+        override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+            onHandlerIfCurrent {
+                networks[network] = networkCapabilities
+                update("onCapabilitiesChanged", gone = null)
+            }
+        }
+
+        override fun onLost(network: Network) {
+            onHandlerIfCurrent {
+                networks.remove(network)
+                update("onLost", gone = network)
+            }
+        }
+
+        private fun update(event: String, gone: Network?) {
+            val network = networkManager.pickUnderlying(networks)
+            if (network == null) {
+                underlyingNetwork?.let { onDefaultNetworkLost(it) }
+            } else {
+                onDefaultNetwork(network, networks[network], event, previousGone = gone != null && gone == underlyingNetwork)
+            }
+            // The active network can switch just after the event that caused it: look again shortly
+            handler.removeCallbacksAndMessages(RECHECK_TOKEN)
+            if (event != "recheck") {
+                handler.postAtTime({ if (networkCallback === this) update("recheck", gone = null) }, RECHECK_TOKEN,
+                    SystemClock.uptimeMillis() + RECHECK_MS)
+            }
+        }
+
+        private fun onHandlerIfCurrent(block: () -> Unit) {
+            onHandler { if (networkCallback === this) block() }
         }
     }
 
@@ -332,6 +423,9 @@ class ConnectionStateManager @Inject constructor(
         const val DNS_WINDOW_MS = 15_000L
         // At most one report per network in this time
         const val REPORT_INTERVAL_MS = 60_000L
+        // API 24-30: the active network is checked again this long after each callback event
+        const val RECHECK_MS = 200L
+        val RECHECK_TOKEN = Any()
     }
 }
 
@@ -344,19 +438,63 @@ class NetworkManager @Inject constructor(
 
     /**
      * The system's default network, never a VPN: Athena is excluded from its own VPN, so its active network is the
-     * real one. Null if there is none.
+     * real one (unlike its default network callback, see ConnectionStateManager). Null if there is none.
      */
     fun getDefaultNetwork(): Network? {
         return try {
             val network = connectivityManager?.activeNetwork ?: return null
             if (getCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true) {
-                Logger.debug { "[Conn] The active network $network is a VPN, using none" }
+                Logger.warn("NetworkManager: The active network $network is a VPN, using none")
                 null
             } else network
         } catch (e: RuntimeException) {
             Logger.error("NetworkManager: Cannot read the active network: ${e.message}", e)
             null
         }
+    }
+
+    /**
+     * Picks the underlying default network out of [networks] (all real networks, API 24-30). Athena is excluded
+     * from its own VPN, so its active network is the system default: that one wins when it is a candidate.
+     * Otherwise (no default yet, or not in the list yet) this approximates Android's ranking: validated beats not
+     * validated, then Ethernet beats Wi-Fi beats mobile data beats the rest.
+     */
+    fun pickUnderlying(networks: Map<Network, NetworkCapabilities>): Network? {
+        val candidates = networks.filterValues { caps ->
+            !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        }
+        val active = try {
+            connectivityManager?.activeNetwork
+        } catch (e: RuntimeException) {
+            null
+        }
+        if (active != null && active in candidates) return active
+        return candidates.entries.maxByOrNull { (_, caps) -> rank(caps) }?.key
+    }
+
+    private fun rank(caps: NetworkCapabilities): Int {
+        val transport = when {
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 3
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 2
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 1
+            else -> 0
+        }
+        val validated = if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) 10 else 0
+        return validated + transport
+    }
+
+    /** For debug logs: "[WIFI validated]", the transports and validation of a network. */
+    fun describe(caps: NetworkCapabilities?): String {
+        if (caps == null) return "[gone]"
+        val parts = mutableListOf<String>()
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) parts += "WIFI"
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) parts += "CELLULAR"
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) parts += "ETHERNET"
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH)) parts += "BLUETOOTH"
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) parts += "VPN"
+        if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) parts += "validated"
+        return parts.joinToString(" ", "[", "]")
     }
 
     fun getCurrentConnectionType(): ConnectionType {
@@ -379,10 +517,17 @@ class NetworkManager @Inject constructor(
     fun getConnectionType(capabilities: NetworkCapabilities?): ConnectionType {
         return when {
             capabilities == null -> ConnectionType.NONE
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
-                !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> ConnectionType.MOBILE
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> ConnectionType.WIFI
+            // Satellite (API 35+) is metered like mobile data and is covered by the mobile rules
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                (Build.VERSION.SDK_INT >= 35 && capabilities.hasTransport(TRANSPORT_SATELLITE)) -> ConnectionType.MOBILE
             else -> ConnectionType.WIFI
         }
+    }
+
+    private companion object {
+        // NetworkCapabilities.TRANSPORT_SATELLITE, API 35
+        const val TRANSPORT_SATELLITE = 10
     }
 
     enum class ConnectionType {

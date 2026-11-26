@@ -72,6 +72,8 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
     private var installedApplications: List<Application>? = null
     private val appChangeReceiver = AppChangeReceiver(this)
     private var isStoppedBySelf = false
+    // Also read on the network thread (ConnectionStateManager.Listener)
+    @Volatile
     private var isShuttingDown = false
     // Debug logs only
     private var isForeground = false
@@ -131,26 +133,19 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
     override fun updateRules(application: Application?) {
         Logger.info("Updating firewall rules${if (application != null) " for ${application.packageID}" else ""}")
         
-        // Clear sessions directly if tunnel manager is initialized
-        try {
-            if (::tunnelManager.isInitialized) {
-                Logger.info("Clearing sessions for rule update")
-                Logger.debug { "[Vpn] clearSessions cause=rule update app=${application?.packageID ?: "all"} by ${Logger.caller()}" }
-                tunnelManager.clearSessions()
-            } else {
-                Logger.debug { "[Vpn] Rule update without a tunnel, no sessions to clear" }
-            }
-        } catch (e: Exception) {
-            Logger.debug(e) { "[Vpn] Clearing sessions for rule update failed" }
-        }
-        
         runBlocking {
             loadApplications()
             showStartNotification(installedApplications!!, preferencesUseCases, appContext)
         }
         
         if (::ruleManager.isInitialized) {
-            ruleManager.updateAppRules()
+            val loading = ruleManager.updateAppRules(application)
+            // Reset only once the new rules are loaded: an app reconnecting right after the reset must meet the new
+            // rules, or its new connection is let through and never checked again (only SYNs are checked)
+            launch(Dispatchers.IO) {
+                loading.joinAll()
+                resetForRuleUpdate(application)
+            }
             Logger.info("Firewall rules updated successfully")
         } else {
             Logger.error("Attempted to update rules before ruleManager was initialized.")
@@ -252,7 +247,24 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
         }
     }
 
-    // ConnectionStateManager.Listener, main thread
+    // After a rule update: one app changed, so only its connections are reset; otherwise all of them
+    private fun resetForRuleUpdate(application: Application?) {
+        try {
+            if (isShuttingDown || !::tunnelManager.isInitialized) {
+                Logger.debug { "[Vpn] Rule update without a running tunnel, no sessions to reset" }
+            } else if (application != null) {
+                Logger.debug { "[Vpn] Rule update for ${application.packageID}: resetting the TCP connections of uid ${application.uid} (rules loaded)" }
+                tunnelManager.resetSessions(intArrayOf(application.uid))
+            } else {
+                Logger.debug { "[Vpn] clearSessions cause=rule update app=all (rules loaded)" }
+                tunnelManager.clearSessions()
+            }
+        } catch (e: Exception) {
+            Logger.debug(e) { "[Vpn] Resetting sessions for rule update failed" }
+        }
+    }
+
+    // ConnectionStateManager.Listener, network thread
     override fun onUnderlyingNetworkLost(lost: Network) {
         // Every upstream socket on the lost network is dead: reset the apps' connections now, so they reconnect on
         // the next network at once instead of waiting for a timeout
@@ -260,17 +272,21 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
         clearSessions()
     }
 
-    // ConnectionStateManager.Listener, main thread
-    override fun onUnderlyingNetworkSwitched(previous: Network?, network: Network, type: NetworkManager.ConnectionType) {
-        // The old network is still up, so the connections on it keep working, as they do without a VPN. Only the
-        // apps blocked on the new network type lose theirs; new connections already follow the new type.
+    // ConnectionStateManager.Listener, network thread
+    override fun onUnderlyingNetworkSwitched(previous: Network?, network: Network, type: NetworkManager.ConnectionType, changedAt: Long) {
+        // The old network still works, but Android stops using it: after a short linger it black-holes the
+        // connections on it without telling anyone. Every TCP connection opened before the change was connect()ed on
+        // it, so reset those now; the apps reconnect on the new network. Connections opened since keep running,
+        // except those of apps blocked on the new network type. UDP follows the default network by itself.
         val uids = ruleManager.blockedUids(type)
         Logger.debug {
-            "[Vpn] Network change kind=switch: ${previous ?: "none"} -> $network ($type), keeping sessions, " +
+            "[Vpn] Network change kind=switch: ${previous ?: "none"} -> $network ($type), " +
+                "${if (previous != null) "resetting the TCP connections opened before the change and" else "keeping sessions,"} " +
                 "resetting the TCP connections of ${uids.size} uids blocked on $type${if (uids.isNotEmpty()) ": ${uids.joinToString(",")}" else ""}"
         }
-        if (isShuttingDown || !::tunnelManager.isInitialized || uids.isEmpty()) return
-        tunnelManager.resetSessions(uids)
+        if (isShuttingDown || !::tunnelManager.isInitialized) return
+        if (previous != null) tunnelManager.resetSessionsBefore(changedAt)
+        if (uids.isNotEmpty()) tunnelManager.resetSessions(uids)
     }
 
 
@@ -282,7 +298,8 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
                         val updatedApp = update(app)
                         applicationUseCases.updateApplication.execute(updatedApp).fold(
                             ifSuccess = {
-                                ruleManager.updateAppRules(updatedApp)
+                                ruleManager.updateAppRules(updatedApp).joinAll()
+                                resetForRuleUpdate(updatedApp)
                                 showInstallNotification(
                                     pkg,
                                     applicationUseCases,

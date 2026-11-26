@@ -46,6 +46,7 @@ import com.kin.athena.service.vpn.network.util.NetworkConstants
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.io.Serializable
 import javax.inject.Inject
@@ -139,14 +140,17 @@ class RuleHandler @Inject constructor(
         }
     }
 
-    fun updateAppRules(updatedApplication: Application? = null) {
+    /** Reloads the app and IP rules. The returned jobs complete once the app rules are loaded. */
+    fun updateAppRules(updatedApplication: Application? = null): List<Job> {
         Logger.debug { "[Rules] Reloading app and IP rules${updatedApplication?.let { " after a change of ${it.packageID}: wifi=${it.internetAccess} cell=${it.cellularAccess}" } ?: ""}" }
-        rules.filterIsInstance<AppRule>().forEach {
+        val loading = rules.filterIsInstance<AppRule>().map {
             it.observePackages(updatedApplication)
         }
+        // The IP rules follow their database flow by themselves
         rules.filterIsInstance<FilterRule>().forEach {
             it.observeIps()
         }
+        return loading
     }
 
     /** The uids that the per-app rules block on [type], see [AppRule.blockedUids]. */

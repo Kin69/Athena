@@ -30,6 +30,7 @@ import com.kin.athena.service.firewall.utils.ConnectivityUtils
 import com.kin.athena.service.vpn.network.transport.dns.DNSModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -38,15 +39,19 @@ class AppRule @Inject constructor(
     private val networkConnectionStateManager: ConnectionStateManager,
     private val connectionUtils: ConnectivityUtils,
 ) : FirewallRule {
+    // Written on IO, read on the tunnel and network threads
+    @Volatile
     private var wifiBlockedUids: IntArray = IntArray(0)
+    @Volatile
     private var cellularBlockedUids: IntArray = IntArray(0)
 
     init {
         observePackages(updatedApplication = null)
     }
 
-    fun observePackages(updatedApplication: Application?) {
-        CoroutineScope(Dispatchers.IO).launch {
+    /** Loads the rules again. The returned job completes once the new lists are in use. */
+    fun observePackages(updatedApplication: Application?): Job {
+        return CoroutineScope(Dispatchers.IO).launch {
             val startedAt = SystemClock.uptimeMillis()
             val packagesList = applicationUseCases.getApplications.execute()
             packagesList.fold(

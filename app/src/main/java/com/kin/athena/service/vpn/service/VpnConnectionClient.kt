@@ -49,6 +49,8 @@ class VpnConnectionClient : VpnService(), ConnectionStateManager.UnderlyingNetwo
 
     private var settings: Settings? = null
     private var isStoppedBySelf = false
+    // Also read on ConnectionStateManager's network thread (onUnderlyingNetwork)
+    @Volatile
     private var vpnInterface: ParcelFileDescriptor? = null
     private var fd: Int = -1
 
@@ -156,9 +158,9 @@ class VpnConnectionClient : VpnService(), ConnectionStateManager.UnderlyingNetwo
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Metered when the underlying network is (mobile data), unmetered on Wi-Fi: the underlying network is set
-            // explicitly on every change (onUnderlyingNetwork)
-            setMetered(true)
+            // false: the VPN inherits meteredness from its underlying network (metered on mobile data, unmetered on
+            // Wi-Fi), which is set explicitly on every change (onUnderlyingNetwork). true would be "always metered".
+            setMetered(false)
         }
         Logger.debug {
             "[Vpn] Builder: address=${settings?.ipv4}/32 dns=${NetworkConstants.VPN_DNS_ADDRESS} route=${NetworkConstants.ALL_TRAFFIC}/0 " +
@@ -191,7 +193,7 @@ class VpnConnectionClient : VpnService(), ConnectionStateManager.UnderlyingNetwo
     }
 
     /**
-     * ConnectionStateManager, main thread: the default network changed. The VPN declares it as its underlying
+     * ConnectionStateManager, network thread: the default network changed. The VPN declares it as its underlying
      * network, so its capabilities (transport, metered, ...) follow it and the apps get onCapabilitiesChanged for the
      * VPN at each change. Null while there is no network.
      */
