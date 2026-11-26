@@ -68,6 +68,8 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
     @Inject @ApplicationContext lateinit var appContext: Context
 
 
+    // Set on the main thread, read and cleared by closeResources, which can run on onDestroy's cleanup thread
+    @Volatile
     private var vpnInterface: ParcelFileDescriptor? = null
     private lateinit var tunnelManager: TunnelManager
     private var netGuardJob: Job? = null

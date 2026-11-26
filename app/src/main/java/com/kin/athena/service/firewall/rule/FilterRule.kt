@@ -26,22 +26,25 @@ import com.kin.athena.service.firewall.model.FirewallResult
 import com.kin.athena.service.vpn.network.transport.dns.DNSModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 class FilterRule @Inject constructor(
     private val networkFilterUseCases: NetworkFilterUseCases
 ) : FirewallRule {
-    init {
-        observeIps()
-    }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    @Volatile
     private var ips: List<Ip>? = null
 
-    fun observeIps() {
-        CoroutineScope(Dispatchers.IO).launch {
-            val packagesList = networkFilterUseCases.getIps.execute()
-            packagesList.fold(
+    init {
+        // One collector for the life of the rule: it follows every change of the IP list by itself
+        scope.launch {
+            networkFilterUseCases.getIps.execute().fold(
+                ifFailure = { Logger.error("Cannot observe the IP filter list: ${it.message}") },
                 ifSuccess = {
                     it.collect { ip ->
                         ips = ip
@@ -50,6 +53,22 @@ class FilterRule @Inject constructor(
                 }
             )
         }
+    }
+
+    /**
+     * Reads the IP list once more, for a rule change that resets connections only after the new rules are loaded
+     * (RuleHandler.updateAppRules). Completes when the list is loaded. Before, every rule change started another
+     * collector that never ended, and the reset did not wait for the IP list.
+     */
+    fun reloadIps(): Job = scope.launch {
+        networkFilterUseCases.getIps.execute().fold(
+            ifFailure = { Logger.error("Cannot load the IP filter list: ${it.message}") },
+            ifSuccess = {
+                val ip = it.first()
+                ips = ip
+                Logger.debug { "[Rules] IP filter list reloaded: ${ip.size} entries" }
+            }
+        )
     }
 
     override fun check(

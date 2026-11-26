@@ -146,11 +146,9 @@ class RuleHandler @Inject constructor(
         val loading = rules.filterIsInstance<AppRule>().map {
             it.observePackages(updatedApplication)
         }
-        // The IP rules follow their database flow by themselves
-        rules.filterIsInstance<FilterRule>().forEach {
-            it.observeIps()
-        }
-        return loading
+        // The IP rules also follow their database flow by themselves; reloaded here so a reset after this waits for
+        // them too (an IP just blocked is checked against the new list when the app reconnects)
+        return loading + rules.filterIsInstance<FilterRule>().map { it.reloadIps() }
     }
 
     /** The uids that the per-app rules block on [type], see [AppRule.blockedUids]. */
