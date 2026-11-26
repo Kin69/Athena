@@ -31,6 +31,7 @@ import com.kin.athena.core.logging.Logger
 import com.kin.athena.data.service.ConnectionStateManager
 import com.kin.athena.domain.model.Settings
 import com.kin.athena.domain.usecase.preferences.PreferencesUseCases
+import com.kin.athena.service.utils.manager.FirewallManager
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.runBlocking
@@ -45,6 +46,7 @@ class VpnConnectionClient : VpnService(), ConnectionStateManager.UnderlyingNetwo
     @Inject lateinit var applicationUseCases: com.kin.athena.domain.usecase.application.ApplicationUseCases
     @Inject lateinit var domainCacheService: com.kin.athena.data.cache.DomainCacheService
     @Inject lateinit var connectionStateManager: ConnectionStateManager
+    @Inject lateinit var firewallManager: FirewallManager
 
 
     private var settings: Settings? = null
@@ -237,10 +239,14 @@ class VpnConnectionClient : VpnService(), ConnectionStateManager.UnderlyingNetwo
 
     override fun onRevoke() {
         Logger.debug { "[Vpn] onRevoke: another VPN took over or the user revoked the permission" }
-        // The server stays bound, so its stop may never come: stop following the default network and drop a
-        // pending underlying-network call for the dead VPN (review minor 12)
+        // Stop following the default network at once and drop a pending underlying-network call for the dead VPN
         connectionStateManager.removeUnderlyingNetworkObserver(this)
         connectionStateManager.onVpnRevoked()
+        // Then a full stop, the same as the shield OFF: FirewallManager unbinds the server and stopVpn stops it. The
+        // server then ends the engine loop, closes the tun after it, leaves the foreground and sets the status OFFLINE.
+        // Before, the bound server kept its engine running on the revoked tun and the app still showed the firewall ON.
+        firewallManager.onVpnRevoked()
+        stopVpn()
         super.onRevoke()
     }
 

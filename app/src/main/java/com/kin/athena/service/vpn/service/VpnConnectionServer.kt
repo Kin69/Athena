@@ -423,7 +423,8 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
 
 
     private fun closeResources() {
-        Logger.debug { "[Vpn] Closing resources: engine=${netGuardJob?.isActive == true} tunnel=${::tunnelManager.isInitialized}" }
+        // The job is already cancelled here (stopVpn cancels the scope), so isActive is false while the loop still runs
+        Logger.debug { "[Vpn] Closing resources: engine=${if (netGuardJob?.isCompleted == false) "running" else "ended"} tunnel=${::tunnelManager.isInitialized}" }
         isShuttingDown = true
         connectionStateManager.stop(this)
         netGuardJob?.cancel()
@@ -457,7 +458,7 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
             }
         }
         if (job == null || job.isCompleted) {
-            close("no engine loop running")
+            close("the engine loop had already ended")
             return
         }
         job.invokeOnCompletion { close("the engine loop ended") }

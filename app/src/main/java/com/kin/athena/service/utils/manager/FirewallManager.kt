@@ -187,6 +187,17 @@ class FirewallManager @Inject constructor(
         currentService.value?.stopService(context) ?: Logger.warn("Service not available for stop.")
     }
     
+    /**
+     * The system revoked the VPN (Settings > VPN > Disconnect, or another VPN app took over). Unbinds the VPN server,
+     * as stopFirewall does, so it can stop: VpnConnectionClient then stops it, and the server ends the engine, closes
+     * the tun and sets the status OFFLINE. Nothing starts it again until the user turns the firewall on.
+     */
+    fun onVpnRevoked() {
+        Logger.debug { "[Fw] VPN revoked: mode=${firewallStateManager.mode} status=${_rulesLoaded.value.name()} bound=$isServiceBound" }
+        if (firewallStateManager.mode != FirewallMode.VPN) return
+        unbindService()
+    }
+
     fun setDnsBlocking(enabled: Boolean) {
         Logger.debug { "[Fw] setDnsBlocking enabled=$enabled bound=$isServiceBound" }
         if (isServiceBound) {
