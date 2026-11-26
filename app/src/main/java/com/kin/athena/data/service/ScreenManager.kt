@@ -17,6 +17,7 @@
 
 package com.kin.athena.data.service
 
+import com.kin.athena.core.logging.Logger
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -31,6 +32,7 @@ class ScreenStateReceiver : BroadcastReceiver() {
     lateinit var screenStateManager: ScreenStateManager
 
     override fun onReceive(context: Context, intent: Intent) {
+        Logger.debug { "[Screen] ${intent.action}" }
         when (intent.action) {
             Intent.ACTION_SCREEN_OFF -> {
                 screenStateManager.updateScreenStatus(ScreenManager.SCREEN_OFF)

@@ -80,6 +80,7 @@ class PackageLoader(
                     val displayName = try {
                         packageManager.getApplicationLabel(appInfo).toString()
                     } catch (e: Exception) {
+                        Logger.debug { "[Pkg] No label for ${appInfo.packageName}: ${e.message}" }
                         appInfo.packageName
                     }
                     
@@ -90,6 +91,7 @@ class PackageLoader(
                             appInfo.packageName
                         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
                     } catch (e: Exception) {
+                        Logger.debug { "[Pkg] Cannot check INTERNET for ${appInfo.packageName}: ${e.message}" }
                         true // Default to true for safety
                     }
                     
@@ -112,6 +114,7 @@ class PackageLoader(
             // Batch insert all new applications
             if (newApplications.isNotEmpty()) {
                 Logger.info("PackageLoader: Inserting ${newApplications.size} new applications")
+                Logger.debug { "[Pkg] New apps (wifi=$wifiDefault cell=$cellularDefault): ${newApplications.joinToString { "${it.packageID}/${it.uid}" }}" }
                 applicationUseCases.addApplications.execute(newApplications)
             } else {
                 Logger.info("PackageLoader: No new applications to insert")

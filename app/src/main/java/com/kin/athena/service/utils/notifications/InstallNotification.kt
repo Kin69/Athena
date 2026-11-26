@@ -67,9 +67,14 @@ suspend fun Service.showInstallNotification(
             preferencesUseCases.loadSettings.execute().fold(
                 ifSuccess = { settings ->
                     val applicationToUse = application ?: createApplication(packageName, settings)
+                    Logger.debug {
+                        "[Pkg] Install notification for $packageName (${if (application != null) "given" else "new"}): uid=${applicationToUse?.uid} " +
+                            "wifi=${applicationToUse?.internetAccess} cell=${applicationToUse?.cellularAccess} root=$useRootMode notify=${settings.sendNotificationOnInstall}"
+                    }
                     applicationToUse?.let { app ->
                         applicationUseCases.addApplication.execute(app).fold(
                             ifSuccess = {
+                                Logger.debug { "[Pkg] Saved $packageName, updating the firewall rules" }
                                 firewallManager.updateFirewallRules(app)
                                 if (settings.sendNotificationOnInstall) {
                                     showNotification(packageName, channelID, app, useRootMode)
@@ -108,6 +113,7 @@ private fun Service.showNotification(
     application: Application,
     useRootMode: Boolean
 ) {
+    Logger.debug { "[Pkg] Showing the install notification for $packageName" }
     doIfNotificationsAllowed {
         val notification = createInstallNotification(packageName, channelID, application, useRootMode)
         notify("Package Install", 2, notification)
@@ -121,6 +127,11 @@ private fun Service.createInstallNotification(
     useRootMode: Boolean
 ): Notification {
     val serviceClass = if (useRootMode) RootConnectionService::class.java else VpnConnectionServer::class.java
+    Logger.debug {
+        "[Pkg] Install notification buttons for $packageName -> ${serviceClass.simpleName}: " +
+            "Wifi button=${NetworkConstants.ACTION_TOGGLE_WIFI.substringAfterLast('.')} (wifi=${application.internetAccess}), " +
+            "Cellular button=${NetworkConstants.ACTION_TOGGLE_CELLURAL.substringAfterLast('.')} (cell=${application.cellularAccess})"
+    }
 
     return NotificationCompat.Builder(this, channelID).apply {
         setColor(Color.RED)

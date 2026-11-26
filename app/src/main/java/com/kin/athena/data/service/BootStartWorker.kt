@@ -39,14 +39,17 @@ class BootStartWorker @AssistedInject constructor(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
+        Logger.debug { "[Boot] BootStartWorker id=$id attempt=$runAttemptCount" }
         return try {
             preferencesUseCases.loadSettings.execute().fold(
                 ifSuccess = { settings ->
+                    Logger.debug { "[Boot] startOnBoot=${settings.startOnBoot} root=${settings.useRootMode} shizuku=${settings.useShizukuMode} speedMonitor=${settings.networkSpeedMonitor}" }
                     if (settings.startOnBoot) {
                         if (settings.useRootMode == true) {
                             firewallManager.setFirewallMode(FirewallMode.ROOT)
                             firewallManager.startFirewall()
                         } else {
+                            Logger.debug { "[Boot] Starting the VPN, permission=${VpnManager.permissionChecker(context)}" }
                             if (VpnManager.permissionChecker(context)) {
                                 firewallManager.startFirewall()
                             } else {

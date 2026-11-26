@@ -17,6 +17,7 @@
 
 package com.kin.athena.service.utils.receiver
 
+import com.kin.athena.core.logging.Logger
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -34,6 +35,10 @@ class AppChangeReceiver(private val callback: AppChangeCallback) : BroadcastRece
     override fun onReceive(context: Context, intent: Intent) {
         val action = intent.action
         val packageName = intent.data?.encodedSchemeSpecificPart
+        Logger.debug {
+            "[Pkg] $action $packageName uid=${intent.getIntExtra(Intent.EXTRA_UID, -1)} " +
+                "replacing=${intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)}"
+        }
 
         when (action) {
             Intent.ACTION_PACKAGE_ADDED -> callback.onAppInstalled(packageName)
@@ -51,6 +56,7 @@ class AppChangeReceiver(private val callback: AppChangeCallback) : BroadcastRece
 
             context.registerReceiver(this, intentFilter)
             isRegistered = true
+            Logger.debug { "[Pkg] Package receiver registered" }
         }
     }
 
@@ -59,8 +65,10 @@ class AppChangeReceiver(private val callback: AppChangeCallback) : BroadcastRece
             try {
                 context.unregisterReceiver(this)
                 isRegistered = false
+                Logger.debug { "[Pkg] Package receiver unregistered" }
             } catch (e: IllegalArgumentException) {
                 // Receiver was not registered, ignore
+                Logger.debug { "[Pkg] Package receiver was not registered: ${e.message}" }
                 isRegistered = false
             }
         }

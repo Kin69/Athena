@@ -55,6 +55,7 @@ suspend fun Service.showStartNotification(applications: List<Application>, prefe
             }
 
             val networkStats = Pair(enabled.count(), disabled.count())
+            Logger.debug { "[Fw] Service notification: allowed=${networkStats.first} blocked=${networkStats.second} foreground=${context == null} permanent=${settings.permanentNotification}" }
 
             val channelID = NotificationUtils.createNotificationChannel(
                 context = contextNot,

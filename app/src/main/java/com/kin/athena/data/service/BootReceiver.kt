@@ -51,6 +51,7 @@ class BootReceiver : BroadcastReceiver() {
     lateinit var context: Context
 
     override fun onReceive(context: Context, intent: Intent) {
+        Logger.debug { "[Boot] Received ${intent.action} (SDK ${Build.VERSION.SDK_INT})" }
         if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
             // On Android 15+, use WorkManager to avoid foreground service restrictions
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
@@ -70,11 +71,13 @@ class BootReceiver : BroadcastReceiver() {
                 CoroutineScope(Dispatchers.IO).launch {
                     preferencesUseCases.loadSettings.execute().fold(
                         ifSuccess = { settings ->
+                            Logger.debug { "[Boot] startOnBoot=${settings.startOnBoot} root=${settings.useRootMode} shizuku=${settings.useShizukuMode} speedMonitor=${settings.networkSpeedMonitor}" }
                             if (settings.startOnBoot) {
                                 if (settings.useRootMode == true) {
                                     firewallManager.setFirewallMode(FirewallMode.ROOT)
                                     firewallManager.startFirewall()
                                 } else {
+                                    Logger.debug { "[Boot] Starting the VPN, permission=${VpnManager.permissionChecker(context)}" }
                                     if (VpnManager.permissionChecker(context)) {
                                         firewallManager.startFirewall()
                                     } else {
