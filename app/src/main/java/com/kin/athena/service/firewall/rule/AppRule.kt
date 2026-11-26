@@ -77,7 +77,6 @@ class AppRule @Inject constructor(
             NetworkManager.ConnectionType.WIFI -> wifiBlocked.copyOf()
             NetworkManager.ConnectionType.MOBILE -> cellularBlocked.copyOf()
             NetworkManager.ConnectionType.NONE -> (wifiBlocked + cellularBlocked).distinct().toIntArray()
-            NetworkManager.ConnectionType.OTHER -> IntArray(0)
         }
     }
 
@@ -93,7 +92,8 @@ class AppRule @Inject constructor(
             packet.shouldLog = false
         }
 
-        // The type follows the default network at once (ConnectionStateManager's network callback)
+        // The type follows the default network at once (ConnectionStateManager's network callback). Ethernet and
+        // other networks count as WIFI, see NetworkManager.getConnectionType.
         val isBlocked = when (networkConnectionStateManager.getCurrentConnectionType()) {
             NetworkManager.ConnectionType.WIFI -> { packet.uid in wifiBlockedUids }
             NetworkManager.ConnectionType.MOBILE -> {
@@ -106,8 +106,6 @@ class AppRule @Inject constructor(
                 packet.networkType = NetworkManager.ConnectionType.NONE
                 packet.uid in wifiBlockedUids || packet.uid in cellularBlockedUids
             }
-            // Ethernet and other networks are not covered by the Wi-Fi and mobile rules
-            NetworkManager.ConnectionType.OTHER -> false
         }
 
         return if (isBlocked) FirewallResult.DROP else FirewallResult.ACCEPT

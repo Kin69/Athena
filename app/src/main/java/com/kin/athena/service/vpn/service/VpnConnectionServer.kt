@@ -49,6 +49,7 @@ import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
 import java.io.IOException
+import java.net.InetAddress
 import javax.inject.Inject
 import kotlin.coroutines.coroutineContext
 
@@ -339,7 +340,13 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
 
         // Initialize TunnelManager with the injected RuleHandler and user's DNS servers
         tunnelManager = TunnelManager(ruleManager, dnsServerV4, dnsServerV6)
-        tunnelManager.upstreamDnsListener = connectionStateManager::onUpstreamDns
+        // A DNS server on the LAN (the router, a Pi-hole) says nothing about the internet connection, so its silence
+        // must not make Android drop a working Wi-Fi
+        if (isLanAddress(dnsServerV4)) {
+            Logger.debug { "[Vpn] Not reporting unanswered DNS to Android: DNS server $dnsServerV4 is a LAN address" }
+        } else {
+            tunnelManager.upstreamDnsListener = connectionStateManager::onUpstreamDns
+        }
         
         if (!tunnelManager.initialize()) {
             Logger.error("Failed to initialize Tunnel Manager")
@@ -350,6 +357,20 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
         Logger.info("Tunnel Manager initialized successfully")
     }
 
+
+    // A numeric private, link-local, loopback or carrier-grade NAT address. Never resolves a name.
+    private fun isLanAddress(address: String): Boolean {
+        if (address.isEmpty() || !address.all { it.isDigit() || it in "abcdefABCDEF.:" }) return false
+        return try {
+            val inet = InetAddress.getByName(address)
+            val bytes = inet.address
+            inet.isSiteLocalAddress || inet.isLinkLocalAddress || inet.isLoopbackAddress || inet.isAnyLocalAddress ||
+                (bytes.size == 4 && bytes[0].toInt() and 0xff == 100 && bytes[1].toInt() and 0xc0 == 64) ||
+                (bytes.size == 16 && bytes[0].toInt() and 0xfe == 0xfc)
+        } catch (e: Exception) {
+            false
+        }
+    }
 
     private fun startVpnCoroutines() {
         // Follow the default network from now on, before the first packet is checked

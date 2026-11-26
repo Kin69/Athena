@@ -147,7 +147,9 @@ class ConnectionStateManager @Inject constructor(
      * resolver's), so a Wi-Fi that is still associated but passes nothing stays the default network for longer.
      * After [DNS_UNANSWERED_REPORT] unanswered queries in a row, sent on the same network within [DNS_WINDOW_MS],
      * Android is told the network has no connectivity, so it validates it again and can move to mobile data sooner.
-     * At most once per [REPORT_INTERVAL_MS] per network.
+     * At most once per [REPORT_INTERVAL_MS] per network, and only for a network Android still sees as validated.
+     * Only queries the engine forwarded to the user's DNS server count: answered locally (blocked domains) they
+     * never reach the engine's forwarding, and VpnConnectionServer does not listen when that server is a LAN one.
      */
     fun onUpstreamDns(answered: Boolean, sentAt: Long) {
         handler.post {
@@ -178,6 +180,13 @@ class ConnectionStateManager @Inject constructor(
             noConnectivityReports.entries.removeAll { now - it.value >= REPORT_INTERVAL_MS }
             noConnectivityReports[network]?.let { reportedAt ->
                 Logger.debug { "[Conn] Not reporting $network again, reported ${now - reportedAt} ms ago" }
+                return@post
+            }
+            // A network Android already sees as without internet (not validated, captive portal) needs no report
+            val caps = networkManager.getCapabilities(network)
+            if (caps == null || !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ||
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL)) {
+                Logger.debug { "[Conn] Not reporting $network: ${if (caps == null) "gone" else "not validated or captive portal"} already" }
                 return@post
             }
             noConnectivityReports[network] = now
@@ -322,7 +331,7 @@ class ConnectionStateManager @Inject constructor(
         // The unanswered queries counted for one report were all sent within this time
         const val DNS_WINDOW_MS = 15_000L
         // At most one report per network in this time
-        const val REPORT_INTERVAL_MS = 30_000L
+        const val REPORT_INTERVAL_MS = 60_000L
     }
 }
 
@@ -363,20 +372,20 @@ class NetworkManager @Inject constructor(
         }
     }
 
+    /**
+     * The type the per-app rules use. Mobile data is MOBILE. Wi-Fi and every other real network (Ethernet, USB or
+     * Bluetooth tethering, ...) is WIFI, so the Wi-Fi rules apply to it. NONE is only "no network at all".
+     */
     fun getConnectionType(capabilities: NetworkCapabilities?): ConnectionType {
         return when {
             capabilities == null -> ConnectionType.NONE
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> ConnectionType.WIFI
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> ConnectionType.MOBILE
-            else -> ConnectionType.OTHER
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
+                !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> ConnectionType.MOBILE
+            else -> ConnectionType.WIFI
         }
     }
 
-    /**
-     * NONE is no network at all. OTHER is a network that is neither Wi-Fi nor mobile data (Ethernet, Bluetooth
-     * tethering, ...), which the per-app Wi-Fi and mobile rules do not cover.
-     */
     enum class ConnectionType {
-        WIFI, MOBILE, NONE, OTHER
+        WIFI, MOBILE, NONE
     }
 }

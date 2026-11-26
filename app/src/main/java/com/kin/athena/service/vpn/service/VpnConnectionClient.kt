@@ -156,7 +156,9 @@ class VpnConnectionClient : VpnService(), ConnectionStateManager.UnderlyingNetwo
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            setMetered(false)
+            // Metered when the underlying network is (mobile data), unmetered on Wi-Fi: the underlying network is set
+            // explicitly on every change (onUnderlyingNetwork)
+            setMetered(true)
         }
         Logger.debug {
             "[Vpn] Builder: address=${settings?.ipv4}/32 dns=${NetworkConstants.VPN_DNS_ADDRESS} route=${NetworkConstants.ALL_TRAFFIC}/0 " +
