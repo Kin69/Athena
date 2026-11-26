@@ -41,8 +41,9 @@ int check_udp_session(const struct arguments *args, struct ng_session *s, int se
     int timeout = get_udp_timeout(&s->udp, sessions, maxsessions);
 
     // A forwarded DNS query without any answer: the DNS server is unreachable over the current network
-    if (s->udp.state == UDP_ACTIVE && s->udp.dns_sent > 0 &&
-        (get_ms() - s->udp.dns_sent >= DNS_ANSWER_TIMEOUT * 1000 || s->udp.time + timeout < now)) {
+    // Only the fixed DNS_ANSWER_TIMEOUT counts: under session load the scaled UDP timeout can reap a slow but
+    // answered query early, and such a session is not counted
+    if (s->udp.state == UDP_ACTIVE && s->udp.dns_sent > 0 && get_ms() - s->udp.dns_sent >= DNS_ANSWER_TIMEOUT * 1000) {
         args->ctx->dns_unanswered++;
         log_android(ANDROID_LOG_INFO, "Forwarded DNS query got no answer in %lld ms, %d in a row", get_ms() - s->udp.dns_sent, args->ctx->dns_unanswered);
         report_upstream_dns(args, JNI_FALSE, s->udp.dns_sent);

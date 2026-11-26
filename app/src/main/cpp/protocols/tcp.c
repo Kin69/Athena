@@ -514,6 +514,7 @@ jboolean handle_tcp(const struct arguments *args, const uint8_t *pkt, size_t len
             s->tcp.local_start = s->tcp.local_seq;
             s->tcp.acked = 0;
             s->tcp.last_keep_alive = 0;
+            s->tcp.created = get_ms();
             s->tcp.sent = 0;
             s->tcp.received = 0;
 

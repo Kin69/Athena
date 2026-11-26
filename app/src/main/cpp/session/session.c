@@ -120,6 +120,35 @@ void reset_uid_sessions(const struct arguments *args, const jint *uids, int coun
     pthread_mutex_unlock(&args->ctx->lock);
 }
 
+// Event thread only, requested by jni_reset_sessions_before: the default network changed while the old one is still
+// up. Every TCP connection opened before the change was connect()ed on the old network, which Android stops using
+// (black-holed after the linger), so the apps get an RST and reconnect on the new network. Connections opened since
+// are on the new network and keep running. UDP upstream sockets are not connected and follow the default network.
+void reset_sessions_before(const struct arguments *args, long long before, long long requested) {
+    if (pthread_mutex_lock(&args->ctx->lock)) {
+        log_android(ANDROID_LOG_ERROR, "Failed to lock mutex for resetting sessions");
+        return;
+    }
+
+    int reset = 0;
+    int kept = 0;
+    for (struct ng_session *s = args->ctx->ng_session; s != NULL; s = s->next) {
+        if (s->protocol != IPPROTO_TCP || s->tcp.state == TCP_CLOSING || s->tcp.state == TCP_CLOSE)
+            continue;
+        if (s->tcp.created >= before) {
+            kept++;
+            continue;
+        }
+        write_rst(args, &s->tcp);
+        reset++;
+    }
+
+    log_android(ANDROID_LOG_INFO, "Reset %d TCP connections opened before the network change (%lld ms ago), kept %d opened since, requested %lld ms ago",
+                reset, get_ms() - before, kept, get_ms() - requested);
+
+    pthread_mutex_unlock(&args->ctx->lock);
+}
+
 void *handle_events(void *a) {
     struct arguments *args = (struct arguments *) a;
 
@@ -163,6 +192,10 @@ void *handle_events(void *a) {
         // the previous epoll_wait is used anymore, so no session is freed while it is in use.
         if (__atomic_exchange_n(&args->ctx->clear_pending, 0, __ATOMIC_ACQ_REL))
             clear_sessions(args, __atomic_load_n(&args->ctx->clear_requested, __ATOMIC_ACQUIRE));
+
+        long long reset_before = __atomic_exchange_n(&args->ctx->reset_before, 0, __ATOMIC_ACQ_REL);
+        if (reset_before > 0)
+            reset_sessions_before(args, reset_before, __atomic_load_n(&args->ctx->reset_before_requested, __ATOMIC_ACQUIRE));
 
         jint *reset_uids = NULL;
         int reset_count = 0;

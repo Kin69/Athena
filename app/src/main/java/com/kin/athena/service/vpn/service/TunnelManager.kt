@@ -167,6 +167,32 @@ class TunnelManager(
         }
     }
 
+    /**
+     * Asks the packet thread to reset the TCP connections opened before [before] (SystemClock.uptimeMillis, the same
+     * clock as the engine's) and keep the newer ones. Returns at once, like [clearSessions].
+     */
+    fun resetSessionsBefore(before: Long) {
+        synchronized(lock) {
+            try {
+                if (isReleased) {
+                    Logger.warn("Cannot reset sessions: TunnelManager has been released")
+                    return
+                }
+                val contextPtrSnapshot = contextPtr
+                if (contextPtrSnapshot != 0L) {
+                    Logger.debug { "[Engine] resetSessionsBefore ${SystemClock.uptimeMillis() - before} ms ago by ${Logger.caller()}: handed to the packet thread" }
+                    jni_reset_sessions_before(contextPtrSnapshot, before)
+                } else {
+                    Logger.warn("Cannot reset sessions: TunnelManager not properly initialized")
+                }
+            } catch (e: UnsatisfiedLinkError) {
+                Logger.error("Native library unavailable for resetSessionsBefore: ${e.message}")
+            } catch (e: Exception) {
+                Logger.error("Error in resetSessionsBefore: ${e.message}", e)
+            }
+        }
+    }
+
     // Called by the native engine on the tunnel thread, see upstreamDnsListener
     private fun onUpstreamDns(answered: Boolean, sentAt: Long) {
         try {
@@ -358,6 +384,7 @@ class TunnelManager(
     private external fun jni_get_mtu(): Int
     private external fun jni_clear_sessions(context: Long)
     private external fun jni_reset_sessions(context: Long, uids: IntArray)
+    private external fun jni_reset_sessions_before(context: Long, before: Long)
     private external fun jni_set_dns_servers(context: Long, dnsV4: String, dnsV6: String)
     private external fun jni_send_complete_packet(context: Long, packetData: ByteArray)
 

@@ -27,6 +27,8 @@ static int current_tun_fd = -1;  // Global TUN file descriptor
 jclass clsPacket;
 jclass clsRR;
 
+static void free_context(struct context *ctx);
+
 jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
     if ((*vm)->GetEnv(vm, (void **) &env, JNI_VERSION_1_6) != JNI_OK) return -1;
@@ -52,6 +54,7 @@ void JNI_OnUnload(JavaVM *vm, void *reserved) {
 JNIEXPORT jlong JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni_1init(JNIEnv *env, jobject instance, jint sdk) {
     struct context *ctx = ng_calloc(1, sizeof(struct context), "init");
     ctx->sdk = sdk;
+    ctx->refs = 1; // the owner, until jni_done
     if (pthread_mutex_init(&ctx->lock, NULL)) log_android(ANDROID_LOG_ERROR, "pthread_mutex_init failed");
     if (pthread_mutex_init(&ctx->reset_lock, NULL)) log_android(ANDROID_LOG_ERROR, "pthread_mutex_init reset_lock failed");
     if (pipe(ctx->pipefds)) log_android(ANDROID_LOG_ERROR, "Create pipe error %d: %s", errno, strerror(errno));
@@ -80,8 +83,14 @@ args->tun = tun;
 args->fwd53 = fwd53;
 args->rcode = rcode;
 args->ctx = ctx;
+// The event thread holds a reference, so jni_done cannot free the context while the loop still uses it
+__atomic_add_fetch(&ctx->refs, 1, __ATOMIC_ACQ_REL);
 handle_events(args);
 current_tun_fd = -1;  // The tunnel is closed after this, its fd number can be reused by any other file
+if (__atomic_sub_fetch(&ctx->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+    log_android(ANDROID_LOG_INFO, "Event loop ended after jni_done, freeing the context now");
+    free_context(ctx);
+}
 }
 
 JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni_1stop(JNIEnv *env, jobject instance, jlong context) {
@@ -90,34 +99,34 @@ ctx->stopping = 1;
 write(ctx->pipefds[1], "w", 1);
 }
 
+// Frees the context once nothing uses it anymore: no event loop runs and the owner called jni_done
+static void free_context(struct context *ctx) {
+    clear(ctx);
+    pthread_mutex_destroy(&ctx->lock);
+    // A reset request that the event thread did not take anymore
+    if (ctx->reset_uids != NULL)
+        ng_free(ctx->reset_uids, __FILE__, __LINE__);
+    pthread_mutex_destroy(&ctx->reset_lock);
+    if (ctx->pipefds[0] >= 0) close(ctx->pipefds[0]);
+    if (ctx->pipefds[1] >= 0) close(ctx->pipefds[1]);
+    ng_free(ctx, __FILE__, __LINE__);
+}
+
 JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni_1done(JNIEnv *env, jobject instance, jlong context) {
     if (context == 0) return;
 
     struct context *ctx = (struct context *) context;
     if (ctx == NULL) return;
 
-    // Lock before clearing to prevent race with handle_events
-    if (pthread_mutex_lock(&ctx->lock) == 0) {
-        clear(ctx);
-        pthread_mutex_unlock(&ctx->lock);
-    } else {
-        // If lock fails, still try to clear (last resort cleanup)
-        clear(ctx);
-    }
-
-    // Only destroy mutex if it was initialized
-    if (pthread_mutex_destroy(&ctx->lock) != 0) {
-        // Mutex was already destroyed or not initialized, continue cleanup
-    }
-
-    // A reset request that the event thread did not take anymore
-    if (ctx->reset_uids != NULL)
-        ng_free(ctx->reset_uids, __FILE__, __LINE__);
-    pthread_mutex_destroy(&ctx->reset_lock);
-
-    if (ctx->pipefds[0] >= 0) close(ctx->pipefds[0]);
-    if (ctx->pipefds[1] >= 0) close(ctx->pipefds[1]);
-    ng_free(ctx, __FILE__, __LINE__);
+    // The event loop may still be between its stop check and its next wake-up. Freeing the context (and destroying
+    // its mutexes) under it crashed with "pthread_mutex_lock called on a destroyed mutex". Make sure it stops, and
+    // let whoever drops the last reference free the context: here, or jni_run once the loop has ended.
+    ctx->stopping = 1;
+    write(ctx->pipefds[1], "d", 1);
+    if (__atomic_sub_fetch(&ctx->refs, 1, __ATOMIC_ACQ_REL) == 0)
+        free_context(ctx);
+    else
+        log_android(ANDROID_LOG_INFO, "jni_done while the event loop still runs, it frees the context when it ends");
 }
 
 JNIEXPORT jstring JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni_1getprop(JNIEnv *env, jclass type, jstring name_) {
@@ -170,17 +179,34 @@ JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni
     // Like jni_clear_sessions, only record the uids: the event thread resets their TCP sessions (reset_uid_sessions).
     // A request that is still pending is merged with this one.
     if (pthread_mutex_lock(&ctx->reset_lock) == 0) {
-        jint *merged = ng_malloc((ctx->reset_count + count) * sizeof(jint), "reset uids");
-        if (ctx->reset_uids != NULL) {
-            memcpy(merged, ctx->reset_uids, ctx->reset_count * sizeof(jint));
-            ng_free(ctx->reset_uids, __FILE__, __LINE__);
-        } else {
+        if (ctx->reset_uids == NULL) {
             ctx->reset_count = 0;
             ctx->reset_requested = get_ms();
         }
-        memcpy(merged + ctx->reset_count, uids, count * sizeof(jint));
+        // Without duplicates and bounded, in case the event thread is gone and nothing takes the request
+        jint *merged = (ctx->reset_count + count <= RESET_UIDS_MAX ?
+                        ng_malloc((ctx->reset_count + count) * sizeof(jint), "reset uids") : NULL);
+        if (merged == NULL) {
+            pthread_mutex_unlock(&ctx->reset_lock);
+            log_android(ANDROID_LOG_ERROR, "Reset of %d uids dropped: %d already pending", (int) count, ctx->reset_count);
+            (*env)->ReleaseIntArrayElements(env, uids_, uids, JNI_ABORT);
+            return;
+        }
+        int merged_count = 0;
+        if (ctx->reset_uids != NULL) {
+            memcpy(merged, ctx->reset_uids, ctx->reset_count * sizeof(jint));
+            merged_count = ctx->reset_count;
+            ng_free(ctx->reset_uids, __FILE__, __LINE__);
+        }
+        for (jsize i = 0; i < count; i++) {
+            int known = 0;
+            for (int j = 0; j < merged_count && !known; j++)
+                known = (merged[j] == uids[i]);
+            if (!known)
+                merged[merged_count++] = uids[i];
+        }
         ctx->reset_uids = merged;
-        ctx->reset_count += count;
+        ctx->reset_count = merged_count;
         pthread_mutex_unlock(&ctx->reset_lock);
         log_android(ANDROID_LOG_INFO, "Reset of the TCP sessions of %d uids requested, the event thread resets them", (int) count);
         wake_event_thread(ctx, "Reset sessions");
@@ -189,6 +215,24 @@ JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni
     }
 
     (*env)->ReleaseIntArrayElements(env, uids_, uids, JNI_ABORT);
+}
+
+JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni_1reset_1sessions_1before(JNIEnv *env, jobject instance, jlong context, jlong before) {
+    if (context == 0 || before <= 0) return;
+
+    struct context *ctx = (struct context *) context;
+    if (ctx == NULL) return;
+
+    // Like jni_clear_sessions: the event thread resets the TCP sessions created before this time
+    // (reset_sessions_before). Several pending requests merge into the latest time.
+    long long current = __atomic_load_n(&ctx->reset_before, __ATOMIC_ACQUIRE);
+    if (current == 0)
+        __atomic_store_n(&ctx->reset_before_requested, get_ms(), __ATOMIC_RELEASE);
+    while (before > current &&
+           !__atomic_compare_exchange_n(&ctx->reset_before, &current, (long long) before, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    log_android(ANDROID_LOG_INFO, "Reset of the TCP sessions created more than %lld ms ago requested, the event thread resets them",
+                get_ms() - (long long) before);
+    wake_event_thread(ctx, "Reset sessions before");
 }
 
 JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni_1set_1dns_1servers(JNIEnv *env, jobject instance, jlong context, jstring dnsV4, jstring dnsV6) {
@@ -360,6 +404,13 @@ jint filter_tcp_packet(const struct arguments *args, const uint8_t *data, size_t
     }
     
     jint result = (*env)->CallIntMethod(env, args->instance, methodID, dataArray, (jint)length, directionStr);
+    // An escaped Throwable leaves the result undefined (0 would read as "allowed, uid 0"), and a pending exception
+    // makes the next JNI calls illegal: drop the packet
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionClear(env);
+        log_android(ANDROID_LOG_ERROR, "TCP filter threw, dropping the packet");
+        result = TCP_FILTER_DROP;
+    }
     
     (*env)->DeleteLocalRef(env, dataArray);
     (*env)->DeleteLocalRef(env, directionStr);
