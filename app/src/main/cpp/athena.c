@@ -128,10 +128,12 @@ JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni
     if (ctx == NULL) return;
 
     // Lock the context to prevent race conditions during session clearing
+    long long lock_start = get_ms();
     if (pthread_mutex_lock(&ctx->lock) != 0) {
         log_android(ANDROID_LOG_ERROR, "Failed to lock context for session clearing");
         return;
     }
+    long long locked_at = get_ms();
 
     // Tell the apps their connections are gone before freeing them. Without an RST an idle connection
     // (push, chat) still looks alive to the app and hangs until the app itself sends something, which for
@@ -149,10 +151,16 @@ JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni
     }
     log_android(ANDROID_LOG_INFO, "Clearing all active sessions, reset %d TCP connections", reset);
 
+    int sessions = 0;
+    for (struct ng_session *s = ctx->ng_session; s != NULL; s = s->next)
+        sessions++;
+
     // Clear all sessions
     clear(ctx);
 
-    log_android(ANDROID_LOG_INFO, "All sessions cleared successfully");
+    // The event thread handles packets under this lock, so a long hold stalls all traffic
+    log_android(ANDROID_LOG_INFO, "All sessions cleared successfully, freed %d sessions, waited %lld ms for the lock and held it %lld ms",
+                sessions, locked_at - lock_start, get_ms() - locked_at);
 
     // Unlock the context
     if (pthread_mutex_unlock(&ctx->lock) != 0) {

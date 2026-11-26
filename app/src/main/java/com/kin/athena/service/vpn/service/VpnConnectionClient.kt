@@ -22,6 +22,7 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.kin.athena.R
 import com.kin.athena.service.vpn.network.util.NetworkConstants
@@ -58,7 +59,17 @@ class VpnConnectionClient : VpnService() {
         }
     }
 
+    override fun onCreate() {
+        super.onCreate()
+        Logger.debug { "[Vpn] Client created" }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // A null intent is a restart by the system (START_STICKY) or an always-on VPN start
+        Logger.debug {
+            val alwaysOn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) " alwaysOn=$isAlwaysOn lockdown=$isLockdownEnabled" else ""
+            "[Vpn] Client onStartCommand action=${intent?.action} flags=$flags startId=$startId running=${vpnInterface != null}$alwaysOn"
+        }
         intent?.action?.let { handleAction(it) } ?: Logger.warn("No action specified in intent.")
         return START_STICKY
     }
@@ -73,6 +84,7 @@ class VpnConnectionClient : VpnService() {
 
     private fun startVpnIfNotRunning() {
         if (vpnInterface == null) {
+            Logger.debug { "[Vpn] Client starting: no VPN interface yet" }
             try {
                 // Initialize domain cache when VPN starts (lazy loading)
                 domainCacheService.initializeGlobally()
@@ -88,9 +100,12 @@ class VpnConnectionClient : VpnService() {
     }
 
     private fun configureAndStartVpn() {
+        val startedAt = SystemClock.uptimeMillis()
         vpnInterface = createVpnBuilder().establish()
+        Logger.debug { "[Vpn] establish() -> ${if (vpnInterface != null) "interface" else "null (not prepared or revoked)"} in ${SystemClock.uptimeMillis() - startedAt} ms" }
         vpnInterface?.let {
             fd = it.detachFd()
+            Logger.debug { "[Vpn] Detached fd=$fd, handing it to the server" }
             startVpnServiceWithFd(fd)
         } ?: run {
             Logger.error("Failed to establish VPN interface.")
@@ -111,6 +126,8 @@ class VpnConnectionClient : VpnService() {
         setSession(getString(R.string.app_name))
         addDisallowedApplication(context.packageName)
         addDisallowedApplication("com.google.android.projection.gearhead")
+        // Debug logs only
+        var bypassApps = 0
 
         // Add VPN bypass for apps that have bypassVpn=true
         runBlocking {
@@ -120,6 +137,7 @@ class VpnConnectionClient : VpnService() {
                         .forEach { app: com.kin.athena.domain.model.Application ->
                             try {
                                 addDisallowedApplication(app.packageID)
+                                bypassApps++
                                 Logger.info("VPN: Bypassing VPN for ${app.packageID}")
                             } catch (e: Exception) {
                                 Logger.error("VPN: Failed to bypass VPN for ${app.packageID}: ${e.message}")
@@ -135,10 +153,15 @@ class VpnConnectionClient : VpnService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             setMetered(false)
         }
+        Logger.debug {
+            "[Vpn] Builder: address=${settings?.ipv4}/32 dns=${NetworkConstants.VPN_DNS_ADDRESS} route=${NetworkConstants.ALL_TRAFFIC}/0 " +
+                "mtu=${NetworkConstants.MAX_PACKET_LEN} disallowed=${bypassApps + 2} ($bypassApps bypass apps)"
+        }
     }
 
     private fun startVpnServiceWithFd(fd: Int) {
         val intent = createServiceIntent(fd, NetworkConstants.ACTION_START_VPN)
+        Logger.debug { "[Vpn] Starting the server with fd=$fd (foreground=${Build.VERSION.SDK_INT >= Build.VERSION_CODES.O})" }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             ContextCompat.startForegroundService(this, intent)
         } else {
@@ -147,6 +170,7 @@ class VpnConnectionClient : VpnService() {
     }
 
     private fun stopVpn(shouldStopSelf: Boolean = true) {
+        Logger.debug { "[Vpn] Client stopping by ${Logger.caller()}: stopSelf=$shouldStopSelf fd=$fd interface=${vpnInterface != null}" }
         stopVpnService(fd)
         vpnInterface.closeSafely()
         vpnInterface = null
@@ -161,7 +185,8 @@ class VpnConnectionClient : VpnService() {
     private fun stopVpnService(fd: Int) {
         try {
             val intent = createServiceIntent(fd, NetworkConstants.ACTION_STOP_VPN)
-            stopService(intent)
+            val stopped = stopService(intent)
+            Logger.debug { "[Vpn] stopService(server) -> $stopped" }
         } catch (e: Exception) {
             Logger.error("Failed to stop VPN service: ${e.message}", e)
         }
@@ -180,8 +205,14 @@ class VpnConnectionClient : VpnService() {
         }
     }
 
+    override fun onRevoke() {
+        Logger.debug { "[Vpn] onRevoke: another VPN took over or the user revoked the permission" }
+        super.onRevoke()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        Logger.debug { "[Vpn] Client destroyed, stoppedBySelf=$isStoppedBySelf" }
         if (!isStoppedBySelf) {
             stopVpn(false)
         }

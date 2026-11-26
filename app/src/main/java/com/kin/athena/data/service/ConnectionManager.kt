@@ -45,7 +45,14 @@ class NetworkChangeReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == ConnectivityManager.CONNECTIVITY_ACTION) {
             val connectionType = networkManager.getCurrentConnectionType()
+            // The sticky broadcast comes right when the receiver is registered, not on a network change
+            Logger.debug {
+                "[Conn] ${intent.action} sticky=$isInitialStickyBroadcast " +
+                    "type ${connectionStateManager.getCurrentConnectionType()}->$connectionType active=${networkManager.describeActiveNetwork()}"
+            }
             connectionStateManager.updateConnectionType(connectionType)
+        } else {
+            Logger.debug { "[Conn] Ignoring broadcast ${intent.action}" }
         }
     }
 }
@@ -62,6 +69,7 @@ class ConnectionStateManager @Inject constructor(
     }
 
     fun updateConnectionType(connectionType: NetworkManager.ConnectionType) {
+        Logger.debug { "[Conn] updateConnectionType $currentConnectionType->$connectionType by ${Logger.caller()}" }
         currentConnectionType = connectionType
         try {
             val clearSessionsServiceIntent = Intent(context, VpnConnectionServer::class.java).apply {
@@ -71,6 +79,7 @@ class ConnectionStateManager @Inject constructor(
             // Use regular startService for session clearing since it's a quick operation
             // that doesn't require foreground service capabilities
             context.startService(clearSessionsServiceIntent)
+            Logger.debug { "[Conn] Asked the VPN server to clear sessions (network change)" }
         } catch (e: Exception) {
             Logger.error("Failed to start VPN service for session clearing: ${e.message}", e)
         }
@@ -91,6 +100,24 @@ class NetworkManager @Inject constructor(
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> ConnectionType.WIFI
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> ConnectionType.MOBILE
             else -> ConnectionType.NONE
+        }
+    }
+
+    /** For debug logs: "123 [WIFI validated]", the active network with its transports, or "none". */
+    fun describeActiveNetwork(): String {
+        return try {
+            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val network = connectivityManager.activeNetwork ?: return "none"
+            val caps = connectivityManager.getNetworkCapabilities(network) ?: return "$network [gone]"
+            val parts = mutableListOf<String>()
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) parts += "WIFI"
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) parts += "CELLULAR"
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) parts += "ETHERNET"
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) parts += "VPN"
+            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) parts += "validated"
+            "$network [${parts.joinToString(" ")}]"
+        } catch (e: RuntimeException) {
+            "unknown (${e.message})"
         }
     }
 

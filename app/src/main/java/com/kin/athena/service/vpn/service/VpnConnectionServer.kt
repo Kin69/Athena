@@ -25,6 +25,9 @@ import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
+import android.util.Log
+import com.kin.athena.BuildConfig
 import com.kin.athena.service.vpn.network.util.NetworkConstants
 import com.kin.athena.core.logging.Logger
 import com.kin.athena.domain.model.Application
@@ -64,6 +67,9 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
     private val appChangeReceiver = AppChangeReceiver(this)
     private var isStoppedBySelf = false
     private var isShuttingDown = false
+    // Debug logs only
+    private var isForeground = false
+    private var isBound = false
 
     inner class VpnConnection : Binder() {
         val service: VpnConnectionServer
@@ -73,7 +79,10 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
     fun loadApplications() {
         runBlocking {
             applicationUseCases.getApplications.execute().fold(
-                ifSuccess = { apps -> installedApplications = apps },
+                ifSuccess = { apps ->
+                    installedApplications = apps
+                    Logger.debug { "[Vpn] Loaded ${apps.size} apps: wifiBlocked=${apps.count { !it.internetAccess }} cellBlocked=${apps.count { !it.cellularAccess }} bypass=${apps.count { it.bypassVpn }}" }
+                },
                 ifFailure = { Logger.error("Failed to fetch applications: ${it.message}") }
             )
         }
@@ -120,10 +129,13 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
         try {
             if (::tunnelManager.isInitialized) {
                 Logger.info("Clearing sessions for rule update")
+                Logger.debug { "[Vpn] clearSessions cause=rule update app=${application?.packageID ?: "all"} by ${Logger.caller()}" }
                 tunnelManager.clearSessions()
+            } else {
+                Logger.debug { "[Vpn] Rule update without a tunnel, no sessions to clear" }
             }
         } catch (e: Exception) {
-
+            Logger.debug(e) { "[Vpn] Clearing sessions for rule update failed" }
         }
         
         runBlocking {
@@ -158,7 +170,22 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
 
     }
 
-    override fun onBind(intent: Intent): IBinder = VpnConnection()
+    override fun onBind(intent: Intent): IBinder {
+        isBound = true
+        Logger.debug { "[Vpn] Server bound" }
+        return VpnConnection()
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        isBound = false
+        Logger.debug { "[Vpn] Server unbound" }
+        return super.onUnbind(intent)
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        Logger.debug { "[Vpn] Server created" }
+    }
 
     @SuppressLint("MissingPermission")
     private fun toggleWifiAccess(packageName: String?) {
@@ -171,6 +198,11 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // A null intent is a restart by the system after the process was killed (START_STICKY)
+        Logger.debug {
+            "[Vpn] Server onStartCommand action=${intent?.action} flags=$flags startId=$startId " +
+                "tunnel=${::tunnelManager.isInitialized} engine=${netGuardJob?.isActive == true} foreground=$isForeground bound=$isBound"
+        }
         when (intent?.action) {
             NetworkConstants.ACTION_TOGGLE_CELLURAL -> toggleWifiAccess(intent.getStringExtra("packageName"))
             NetworkConstants.ACTION_TOGGLE_WIFI -> toggleCellularAccess(intent.getStringExtra("packageName"))
@@ -180,8 +212,11 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
                 return START_STICKY
             }
             NetworkConstants.ACTION_CLEAR_SESSIONS -> {
+                Logger.debug { "[Vpn] clearSessions cause=network change" }
                 clearSessions()
                 // For session clearing, we don't need to keep the service running
+                // A running server stays only while it is bound, so this line shows whether the clear could stop it
+                Logger.debug { "[Vpn] stopSelf after clear: tunnel=${::tunnelManager.isInitialized} engine=${netGuardJob?.isActive == true} foreground=$isForeground bound=$isBound" }
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -202,8 +237,10 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
             
             if (::tunnelManager.isInitialized) {
                 Logger.info("Clearing all active sessions due to network change")
+                val startedAt = SystemClock.uptimeMillis()
                 tunnelManager.clearSessions()
                 Logger.info("All sessions cleared successfully")
+                Logger.debug { "[Vpn] Sessions cleared in ${SystemClock.uptimeMillis() - startedAt} ms" }
             } else {
                 Logger.warn("TunnelManager not initialized for session clearing")
             }
@@ -241,12 +278,16 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
 
     private fun startVpn(intent: Intent) {
         val vpnInterfaceFd = intent.getIntExtra("vpnInterfaceFd", -1)
+        Logger.debug { "[Vpn] Server startVpn fd=$vpnInterfaceFd tunnelBefore=${::tunnelManager.isInitialized} engineBefore=${netGuardJob?.isActive == true}" }
+        if (vpnInterfaceFd == -1) Logger.debug { "[Vpn] START_VPN without an fd, nothing started" }
         if (vpnInterfaceFd != -1) {
             // Start foreground service immediately to avoid timing issues
             runBlocking {
                 loadApplications()
                 showStartNotification(installedApplications!!, preferencesUseCases)
             }
+            isForeground = true
+            Logger.debug { "[Vpn] Server in the foreground" }
             
             vpnInterface = ParcelFileDescriptor.adoptFd(vpnInterfaceFd)
             vpnInterface?.let {
@@ -265,9 +306,13 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
         val (dnsServerV4, dnsServerV6) = runBlocking {
             preferencesUseCases.loadSettings.execute().fold(
                 ifSuccess = { Pair(it.dnsServer1, it.dnsServer1v6) },
-                ifFailure = { Pair("9.9.9.9", "2620:fe::fe") }
+                ifFailure = {
+                    Logger.debug { "[Vpn] Settings not loaded (${it.message}), using the default DNS servers" }
+                    Pair("9.9.9.9", "2620:fe::fe")
+                }
             )
         }
+        Logger.debug { "[Vpn] Upstream DNS v4=$dnsServerV4 v6=$dnsServerV6" }
 
         // Initialize TunnelManager with the injected RuleHandler and user's DNS servers
         tunnelManager = TunnelManager(ruleManager, dnsServerV4, dnsServerV6)
@@ -286,16 +331,20 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
         launch { if (::firewallManager.isInitialized) { firewallManager.update(FirewallStatus.ONLINE) } }
         launch(Dispatchers.IO) { ruleManager.updateAppRules() }
         
-        // Start Tunnel Manager VPN processing
-        val logLevel = 2 // ANDROID_LOG_WARN
+        // Start Tunnel Manager VPN processing. The native engine logs everything in debug builds; release builds keep
+        // its info, warnings and errors. Both stay below ANDROID_LOG_WARN, which also turns on the IPv4 checksum check.
+        val logLevel = if (BuildConfig.DEBUG) Log.VERBOSE else Log.INFO
         tunnelManager.start(logLevel)
         
         netGuardJob = launch(Dispatchers.IO) {
+            val startedAt = SystemClock.uptimeMillis()
             try {
                 vpnInterface?.let { vpnFd ->
                     Logger.info("Starting Tunnel Manager packet processing")
+                    Logger.debug { "[Vpn] Tunnel thread started on fd=${vpnFd.fd} (${Thread.currentThread().name})" }
                     tunnelManager.run(vpnFd.fd, forwardDns = true, rcode = 3)
-                }
+                    Logger.debug { "[Vpn] Tunnel thread on fd=${vpnFd.fd} ended after ${SystemClock.uptimeMillis() - startedAt} ms" }
+                } ?: Logger.debug { "[Vpn] Tunnel thread not started: no VPN interface" }
             } catch (e: Exception) {
                 Logger.error("Tunnel Manager processing error: ${e.message}", e)
             }
@@ -304,6 +353,7 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
 
 
     private fun closeResources() {
+        Logger.debug { "[Vpn] Closing resources: engine=${netGuardJob?.isActive == true} tunnel=${::tunnelManager.isInitialized}" }
         isShuttingDown = true
         netGuardJob?.cancel()
         if (::tunnelManager.isInitialized) {
@@ -315,6 +365,8 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
 
     override fun onDestroy() {
         super.onDestroy()
+        Logger.debug { "[Vpn] Server destroyed: stoppedBySelf=$isStoppedBySelf tunnel=${::tunnelManager.isInitialized} engine=${netGuardJob?.isActive == true} foreground=$isForeground" }
+        isForeground = false
 
         // Immediately stop foreground to prevent timeout exception
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -337,6 +389,7 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
 
 
     private fun stopVpn() {
+        Logger.debug { "[Vpn] Server stopVpn by ${Logger.caller()}: status=${if (::firewallManager.isInitialized) firewallManager.rulesLoaded.value.name() else "?"}" }
         appChangeReceiver.unregister(this)
         if (::firewallManager.isInitialized) {
             if (firewallManager.rulesLoaded.value.name() == FirewallStatus.ONLINE.name()) {
@@ -352,6 +405,8 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
                 Logger.info("Vpn server is stopped")
                 isStoppedBySelf = true
                 stopSelf()
+            } else {
+                Logger.debug { "[Vpn] Server not ONLINE, nothing stopped" }
             }
         } else {
             Logger.warn("Vpn server is not running")

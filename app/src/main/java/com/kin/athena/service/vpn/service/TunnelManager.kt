@@ -18,6 +18,7 @@
 package com.kin.athena.service.vpn.service
 
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import com.kin.athena.core.logging.Logger
 import com.kin.athena.service.firewall.handler.RuleHandler
@@ -52,6 +53,7 @@ class TunnelManager(
 
     fun initialize(): Boolean {
         contextPtr = jni_init(Build.VERSION.SDK_INT)
+        Logger.debug { "[Engine] jni_init sdk=${Build.VERSION.SDK_INT} -> ${if (contextPtr != 0L) "ok" else "failed"}" }
         if (contextPtr != 0L) {
             // Set DNS servers in native code
             jni_set_dns_servers(contextPtr, dnsServerV4, dnsServerV6)
@@ -60,6 +62,7 @@ class TunnelManager(
     }
     
     fun start(logLevel: Int) {
+        Logger.debug { "[Engine] start logLevel=$logLevel initialized=${contextPtr != 0L}" }
         if (contextPtr != 0L) {
             jni_start(contextPtr, logLevel)
         }
@@ -67,17 +70,24 @@ class TunnelManager(
     
     fun run(tunFd: Int, forwardDns: Boolean = true, rcode: Int = 3) {
         if (contextPtr != 0L) {
+            val startedAt = SystemClock.uptimeMillis()
+            Logger.debug { "[Engine] jni_run fd=$tunFd forwardDns=$forwardDns rcode=$rcode on ${Thread.currentThread().name}" }
             jni_run(contextPtr, tunFd, forwardDns, rcode)
+            Logger.debug { "[Engine] jni_run fd=$tunFd exited after ${SystemClock.uptimeMillis() - startedAt} ms" }
+        } else {
+            Logger.debug { "[Engine] run fd=$tunFd skipped: not initialized" }
         }
     }
     
     fun stop() {
+        Logger.debug { "[Engine] stop initialized=${contextPtr != 0L}" }
         if (contextPtr != 0L) {
             jni_stop(contextPtr)
         }
     }
     
     fun done() {
+        Logger.debug { "[Engine] done initialized=${contextPtr != 0L}" }
         if (contextPtr != 0L) {
             jni_done(contextPtr)
             contextPtr = 0L
@@ -99,6 +109,8 @@ class TunnelManager(
     }
     
     fun clearSessions() {
+        // Debug logs only: a long wait for the lock means the clear was queued behind release()
+        val calledAt = SystemClock.uptimeMillis()
         synchronized(lock) {
             try {
                 if (isReleased) {
@@ -107,7 +119,10 @@ class TunnelManager(
                 }
                 val contextPtrSnapshot = contextPtr
                 if (contextPtrSnapshot != 0L) {
+                    val lockedAt = SystemClock.uptimeMillis()
+                    Logger.debug { "[Engine] clearSessions by ${Logger.caller()} on ${Thread.currentThread().name}, waited ${lockedAt - calledAt} ms for the lock" }
                     jni_clear_sessions(contextPtrSnapshot)
+                    Logger.debug { "[Engine] jni_clear_sessions blocked for ${SystemClock.uptimeMillis() - lockedAt} ms" }
                 } else {
                     Logger.warn("Cannot clear sessions: TunnelManager not properly initialized")
                 }
@@ -258,6 +273,7 @@ class TunnelManager(
     }
 
     fun release() {
+        Logger.debug { "[Engine] release released=$isReleased initialized=${contextPtr != 0L}" }
         synchronized(lock) {
             if (!isReleased) {
                 isReleased = true
