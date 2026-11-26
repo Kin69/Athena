@@ -19,6 +19,7 @@ package com.kin.athena.service.vpn.service
 
 import android.content.Context
 import android.content.Intent
+import android.net.Network
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -27,6 +28,7 @@ import androidx.core.content.ContextCompat
 import com.kin.athena.R
 import com.kin.athena.service.vpn.network.util.NetworkConstants
 import com.kin.athena.core.logging.Logger
+import com.kin.athena.data.service.ConnectionStateManager
 import com.kin.athena.domain.model.Settings
 import com.kin.athena.domain.usecase.preferences.PreferencesUseCases
 import dagger.hilt.android.AndroidEntryPoint
@@ -36,12 +38,13 @@ import java.io.IOException
 import javax.inject.Inject
 
 @AndroidEntryPoint
-class VpnConnectionClient : VpnService() {
+class VpnConnectionClient : VpnService(), ConnectionStateManager.UnderlyingNetworkObserver {
 
     @Inject @ApplicationContext lateinit var context: Context
     @Inject lateinit var preferencesUseCases: PreferencesUseCases
     @Inject lateinit var applicationUseCases: com.kin.athena.domain.usecase.application.ApplicationUseCases
     @Inject lateinit var domainCacheService: com.kin.athena.data.cache.DomainCacheService
+    @Inject lateinit var connectionStateManager: ConnectionStateManager
 
 
     private var settings: Settings? = null
@@ -104,6 +107,8 @@ class VpnConnectionClient : VpnService() {
         vpnInterface = createVpnBuilder().establish()
         Logger.debug { "[Vpn] establish() -> ${if (vpnInterface != null) "interface" else "null (not prepared or revoked)"} in ${SystemClock.uptimeMillis() - startedAt} ms" }
         vpnInterface?.let {
+            // Only the VpnService that established the VPN can set its underlying network
+            connectionStateManager.addUnderlyingNetworkObserver(this)
             fd = it.detachFd()
             Logger.debug { "[Vpn] Detached fd=$fd, handing it to the server" }
             startVpnServiceWithFd(fd)
@@ -171,6 +176,7 @@ class VpnConnectionClient : VpnService() {
 
     private fun stopVpn(shouldStopSelf: Boolean = true) {
         Logger.debug { "[Vpn] Client stopping by ${Logger.caller()}: stopSelf=$shouldStopSelf fd=$fd interface=${vpnInterface != null}" }
+        connectionStateManager.removeUnderlyingNetworkObserver(this)
         stopVpnService(fd)
         vpnInterface.closeSafely()
         vpnInterface = null
@@ -179,6 +185,26 @@ class VpnConnectionClient : VpnService() {
             stopSelf()
         } else {
             Logger.info("Firewall was stopped, possibly by another VPN.")
+        }
+    }
+
+    /**
+     * ConnectionStateManager, main thread: the default network changed. The VPN declares it as its underlying
+     * network, so its capabilities (transport, metered, ...) follow it and the apps get onCapabilitiesChanged for the
+     * VPN at each change. Null while there is no network.
+     */
+    override fun onUnderlyingNetwork(network: Network?) {
+        if (vpnInterface == null) {
+            Logger.debug { "[Vpn] Not setting the underlying network $network: the VPN is not established" }
+            return
+        }
+        try {
+            val networks = network?.let { arrayOf(it) }
+            val ok = setUnderlyingNetworks(networks)
+            Logger.debug { "[Vpn] setUnderlyingNetworks(${networks?.joinToString(prefix = "[", postfix = "]") ?: "null"}) -> $ok" }
+            if (!ok) Logger.warn("Could not set the VPN's underlying network $network")
+        } catch (e: RuntimeException) {
+            Logger.error("Could not set the VPN's underlying network $network: ${e.message}", e)
         }
     }
 

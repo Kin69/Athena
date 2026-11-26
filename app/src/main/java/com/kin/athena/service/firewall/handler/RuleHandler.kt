@@ -20,11 +20,10 @@ package com.kin.athena.service.firewall.handler
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.net.ConnectivityManager
 import androidx.core.content.ContextCompat
 import androidx.core.content.ContextCompat.registerReceiver
 import com.kin.athena.core.logging.Logger
-import com.kin.athena.data.service.NetworkChangeReceiver
+import com.kin.athena.data.service.NetworkManager
 import com.kin.athena.data.service.ScreenStateManager
 import com.kin.athena.data.service.ScreenStateReceiver
 import com.kin.athena.domain.model.Application
@@ -55,7 +54,6 @@ class RuleHandler @Inject constructor(
     private val rules: List<FirewallRule>,
     private val logUseCases: LogUseCases,
     private val preferencesUseCases: PreferencesUseCases,
-    networkChangeReceiver: NetworkChangeReceiver,
     @ApplicationContext private val context: Context
 ) {
     var allowLocal = false
@@ -63,11 +61,10 @@ class RuleHandler @Inject constructor(
     private val decisionLog = Logger.Throttle()
 
     init {
-        val filter = IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION)
+        // Network changes are followed by ConnectionStateManager while the tunnel runs
         val screenStateReceiver = ScreenStateReceiver()
         val intentFilter = IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON) }
 
-        registerReceiver(context, networkChangeReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         registerReceiver(context, screenStateReceiver, intentFilter, ContextCompat.RECEIVER_NOT_EXPORTED)
 
         CoroutineScope(Dispatchers.IO).launch {
@@ -150,6 +147,11 @@ class RuleHandler @Inject constructor(
         rules.filterIsInstance<FilterRule>().forEach {
             it.observeIps()
         }
+    }
+
+    /** The uids that the per-app rules block on [type], see [AppRule.blockedUids]. */
+    fun blockedUids(type: NetworkManager.ConnectionType): IntArray {
+        return rules.filterIsInstance<AppRule>().firstOrNull()?.blockedUids(type) ?: IntArray(0)
     }
 
     fun handle(packet: FireWallModel, dnsModel: DNSModel? = null, bypassCheck: Boolean): Triple<Boolean, Int, FirewallResult> {

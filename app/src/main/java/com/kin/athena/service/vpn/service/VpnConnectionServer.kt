@@ -21,6 +21,7 @@ import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.Network
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -30,6 +31,8 @@ import android.util.Log
 import com.kin.athena.BuildConfig
 import com.kin.athena.service.vpn.network.util.NetworkConstants
 import com.kin.athena.core.logging.Logger
+import com.kin.athena.data.service.ConnectionStateManager
+import com.kin.athena.data.service.NetworkManager
 import com.kin.athena.domain.model.Application
 import com.kin.athena.service.utils.receiver.AppChangeCallback
 import com.kin.athena.service.utils.receiver.AppChangeReceiver
@@ -50,12 +53,14 @@ import javax.inject.Inject
 import kotlin.coroutines.coroutineContext
 
 @AndroidEntryPoint
-class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeCallback, FirewallService {
+class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeCallback, FirewallService,
+    ConnectionStateManager.Listener {
 
     @Inject lateinit var firewallManager: FirewallManager
     @Inject lateinit var ruleManager: RuleHandler
     @Inject lateinit var applicationUseCases: ApplicationUseCases
     @Inject lateinit var preferencesUseCases: PreferencesUseCases
+    @Inject lateinit var connectionStateManager: ConnectionStateManager
     @Inject @ApplicationContext lateinit var appContext: Context
 
 
@@ -212,21 +217,22 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
                 return START_STICKY
             }
             NetworkConstants.ACTION_CLEAR_SESSIONS -> {
-                Logger.debug { "[Vpn] clearSessions cause=network change" }
+                // Nothing in the app sends this anymore: network changes come from ConnectionStateManager
+                Logger.debug { "[Vpn] clearSessions cause=ACTION_CLEAR_SESSIONS" }
                 clearSessions()
-                // For session clearing, we don't need to keep the service running
-                // A running server stays only while it is bound, so this line shows whether the clear could stop it
-                Logger.debug { "[Vpn] stopSelf after clear: tunnel=${::tunnelManager.isInitialized} engine=${netGuardJob?.isActive == true} foreground=$isForeground bound=$isBound" }
-                stopSelf()
-                return START_NOT_STICKY
+                // Never stop a running server here. Only an instance created just for this intent has nothing to do.
+                if (!::tunnelManager.isInitialized) {
+                    Logger.debug { "[Vpn] stopSelf($startId) after ACTION_CLEAR_SESSIONS: no tunnel in this instance" }
+                    stopSelf(startId)
+                    return START_NOT_STICKY
+                }
             }
         }
         return START_STICKY
     }
 
     /**
-     * Clears all active sessions. This is useful when firewall rules are updated
-     * to ensure previously allowed sessions are terminated and new rules are applied.
+     * Resets all TCP connections and frees all sessions. The packet thread does it, this returns at once.
      */
     fun clearSessions() {
         try {
@@ -236,17 +242,34 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
             }
             
             if (::tunnelManager.isInitialized) {
-                Logger.info("Clearing all active sessions due to network change")
-                val startedAt = SystemClock.uptimeMillis()
                 tunnelManager.clearSessions()
-                Logger.info("All sessions cleared successfully")
-                Logger.debug { "[Vpn] Sessions cleared in ${SystemClock.uptimeMillis() - startedAt} ms" }
             } else {
                 Logger.warn("TunnelManager not initialized for session clearing")
             }
         } catch (e: Exception) {
             Logger.error("Error clearing sessions: ${e.message}", e)
         }
+    }
+
+    // ConnectionStateManager.Listener, main thread
+    override fun onUnderlyingNetworkLost(lost: Network) {
+        // Every upstream socket on the lost network is dead: reset the apps' connections now, so they reconnect on
+        // the next network at once instead of waiting for a timeout
+        Logger.debug { "[Vpn] Network change kind=lost: $lost is gone, resetting all TCP connections and freeing all sessions" }
+        clearSessions()
+    }
+
+    // ConnectionStateManager.Listener, main thread
+    override fun onUnderlyingNetworkSwitched(previous: Network?, network: Network, type: NetworkManager.ConnectionType) {
+        // The old network is still up, so the connections on it keep working, as they do without a VPN. Only the
+        // apps blocked on the new network type lose theirs; new connections already follow the new type.
+        val uids = ruleManager.blockedUids(type)
+        Logger.debug {
+            "[Vpn] Network change kind=switch: ${previous ?: "none"} -> $network ($type), keeping sessions, " +
+                "resetting the TCP connections of ${uids.size} uids blocked on $type${if (uids.isNotEmpty()) ": ${uids.joinToString(",")}" else ""}"
+        }
+        if (isShuttingDown || !::tunnelManager.isInitialized || uids.isEmpty()) return
+        tunnelManager.resetSessions(uids)
     }
 
 
@@ -328,6 +351,8 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
 
 
     private fun startVpnCoroutines() {
+        // Follow the default network from now on, before the first packet is checked
+        connectionStateManager.start(this)
         launch { if (::firewallManager.isInitialized) { firewallManager.update(FirewallStatus.ONLINE) } }
         launch(Dispatchers.IO) { ruleManager.updateAppRules() }
         
@@ -355,6 +380,7 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
     private fun closeResources() {
         Logger.debug { "[Vpn] Closing resources: engine=${netGuardJob?.isActive == true} tunnel=${::tunnelManager.isInitialized}" }
         isShuttingDown = true
+        connectionStateManager.stop(this)
         netGuardJob?.cancel()
         if (::tunnelManager.isInitialized) {
             tunnelManager.stop()
@@ -367,6 +393,7 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
         super.onDestroy()
         Logger.debug { "[Vpn] Server destroyed: stoppedBySelf=$isStoppedBySelf tunnel=${::tunnelManager.isInitialized} engine=${netGuardJob?.isActive == true} foreground=$isForeground" }
         isForeground = false
+        if (::connectionStateManager.isInitialized) connectionStateManager.stop(this)
 
         // Immediately stop foreground to prevent timeout exception
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

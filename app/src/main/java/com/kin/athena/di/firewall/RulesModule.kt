@@ -19,7 +19,6 @@ package com.kin.athena.di.firewall
 
 import android.content.Context
 import com.kin.athena.data.service.ConnectionStateManager
-import com.kin.athena.data.service.NetworkChangeReceiver
 import com.kin.athena.data.service.NetworkManager
 import com.kin.athena.data.service.ScreenStateManager
 import com.kin.athena.domain.usecase.application.ApplicationUseCases
@@ -79,20 +78,6 @@ object RulesModule {
         @ApplicationContext context: Context
     ): ConnectivityUtils {
         return ConnectivityUtils(context)
-    }
-
-
-    @Provides
-    @Singleton
-    fun provideNetworkChangeReceiver(
-        @ApplicationContext context: Context,
-        networkManager: NetworkManager,
-        connectionStateManager: ConnectionStateManager
-    ): NetworkChangeReceiver {
-        return NetworkChangeReceiver().apply {
-            this.networkManager = networkManager
-            this.connectionStateManager = connectionStateManager
-        }
     }
 
 
@@ -195,9 +180,8 @@ object RulesModule {
         customDomainRule: CustomDomainRule,
         logUseCases: LogUseCases,
         preferencesUseCases: PreferencesUseCases,
-        networkChangeReceiver: NetworkChangeReceiver,
         @ApplicationContext context: Context
     ): RuleHandler {
-        return RuleHandler(listOf(appRule, DNSRule, customDomainRule, filterRule, screenRule, httpRule, logRule), logUseCases, preferencesUseCases, networkChangeReceiver, context)
+        return RuleHandler(listOf(appRule, DNSRule, customDomainRule, filterRule, screenRule, httpRule, logRule), logUseCases, preferencesUseCases, context)
     }
 }

@@ -67,6 +67,12 @@ class ScreenRule @Inject constructor(
                     FirewallResult.DROP
                 } else FirewallResult.ACCEPT
             }
+            // No network (AppRule fails closed then too): the next network can be either type
+            (blockWhenScreenOffData == true || blockWhenScreenOffWifi == true) && packet.networkType == NetworkManager.ConnectionType.NONE -> {
+                if (screenStateManager.currentScreenStatus == ScreenManager.SCREEN_OFF) {
+                    FirewallResult.DROP
+                } else FirewallResult.ACCEPT
+            }
             else -> FirewallResult.ACCEPT
         }
     }

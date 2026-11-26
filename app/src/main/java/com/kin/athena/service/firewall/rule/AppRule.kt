@@ -69,6 +69,18 @@ class AppRule @Inject constructor(
         }
     }
 
+    /** The uids blocked on [type]: on no network (NONE) the uids blocked on either type, as in [check]. */
+    fun blockedUids(type: NetworkManager.ConnectionType): IntArray {
+        val wifiBlocked = wifiBlockedUids
+        val cellularBlocked = cellularBlockedUids
+        return when (type) {
+            NetworkManager.ConnectionType.WIFI -> wifiBlocked.copyOf()
+            NetworkManager.ConnectionType.MOBILE -> cellularBlocked.copyOf()
+            NetworkManager.ConnectionType.NONE -> (wifiBlocked + cellularBlocked).distinct().toIntArray()
+            NetworkManager.ConnectionType.OTHER -> IntArray(0)
+        }
+    }
+
     override fun check(
         packet: FireWallModel,
         dnsModel: DNSModel?,
@@ -81,13 +93,21 @@ class AppRule @Inject constructor(
             packet.shouldLog = false
         }
 
+        // The type follows the default network at once (ConnectionStateManager's network callback)
         val isBlocked = when (networkConnectionStateManager.getCurrentConnectionType()) {
             NetworkManager.ConnectionType.WIFI -> { packet.uid in wifiBlockedUids }
             NetworkManager.ConnectionType.MOBILE -> {
                 packet.networkType = NetworkManager.ConnectionType.MOBILE
                 packet.uid in cellularBlockedUids
             }
-            NetworkManager.ConnectionType.NONE -> false
+            // No network, for example between losing Wi-Fi and getting mobile data: fail closed. The next network
+            // can be either type, and a connection let through now would be opened on it.
+            NetworkManager.ConnectionType.NONE -> {
+                packet.networkType = NetworkManager.ConnectionType.NONE
+                packet.uid in wifiBlockedUids || packet.uid in cellularBlockedUids
+            }
+            // Ethernet and other networks are not covered by the Wi-Fi and mobile rules
+            NetworkManager.ConnectionType.OTHER -> false
         }
 
         return if (isBlocked) FirewallResult.DROP else FirewallResult.ACCEPT
