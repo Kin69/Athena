@@ -546,6 +546,17 @@ jboolean handle_tcp(const struct arguments *args, const uint8_t *pkt, size_t len
 
             s->socket = open_tcp_socket(args, &s->tcp, redirect);
             if (s->socket < 0) {
+                // The upstream connection failed at once (no network during a switch: ENETUNREACH). Refuse the SYN
+                // now, as the app's own connect() would fail without a VPN, instead of leaving it to its SYN
+                // retransmits (1, 2, 4 s ...). RFC 9293 3.10.7.1, reply to a segment without ACK:
+                // <SEQ=0><ACK=SEG.SEQ+SEG.LEN><CTL=RST,ACK>. write_rst sets ACK and adds 1 for the SYN in LISTEN.
+                int err = errno;
+                s->tcp.local_seq = 0;
+                s->tcp.remote_seq += datalen;
+                s->tcp.recv_window = 0;
+                write_rst(args, &s->tcp);
+                log_android(ANDROID_LOG_DEBUG, "TCP upstream connection to port %d failed at once (%d: %s), refused the app's SYN with an RST",
+                            ntohs(s->tcp.dest), err, strerror(err));
                 // The SYN's queued data too, not only the session
                 clear_tcp_data(&s->tcp);
                 ng_free(s, __FILE__, __LINE__);
@@ -557,8 +568,14 @@ jboolean handle_tcp(const struct arguments *args, const uint8_t *pkt, size_t len
             memset(&s->ev, 0, sizeof(struct epoll_event));
             s->ev.events = EPOLLOUT | EPOLLERR;
             s->ev.data.ptr = s;
-            if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, s->socket, &s->ev))
+            if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, s->socket, &s->ev)) {
+                // Not linked into the session list yet: close and free everything here, or it leaks
+                log_android(ANDROID_LOG_ERROR, "epoll add TCP socket %d error %d: %s", s->socket, errno, strerror(errno));
+                close(s->socket);
+                clear_tcp_data(&s->tcp);
+                ng_free(s, __FILE__, __LINE__);
                 return 0;
+            }
 
             s->next = args->ctx->ng_session;
             args->ctx->ng_session = s;
