@@ -147,6 +147,10 @@ void reset_sessions_before(const struct arguments *args, long long before, long 
                 reset, get_ms() - before, kept, get_ms() - requested);
 
     pthread_mutex_unlock(&args->ctx->lock);
+
+    // The RSTs are written to the tun now: ConnectionStateManager tells the VPN its new underlying network only after
+    // this (an app such as GMS reconnects at once only when the VPN's capability change reaches it after the RST)
+    report_reset_before(args, before, reset, get_ms());
 }
 
 void *handle_events(void *a) {

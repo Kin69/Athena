@@ -48,7 +48,8 @@ import javax.inject.Singleton
  * - another network became the default while the old one still works (back on Wi-Fi from mobile data): the
  *   [Listener] resets the connections opened before the change (they run on the old network, which Android stops
  *   using) and those of the apps blocked on the new network type, and keeps the rest,
- * - the [UnderlyingNetworkObserver] (the VpnService) sets the VPN's underlying network.
+ * - the [UnderlyingNetworkObserver] (the VpnService) sets the VPN's underlying network: at once, except after a
+ *   reset of the connections opened before a switch, see [deferUnderlyingNetwork].
  * The initial event of the callback and repeated events for the same network (signal strength, bandwidth) change
  * nothing.
  *
@@ -67,11 +68,13 @@ class ConnectionStateManager @Inject constructor(
         /**
          * [network] of [type] became the default network at [changedAt] (SystemClock.uptimeMillis) while [previous]
          * still works. [previous] is null when there was no network, or when only the type of [network] changed.
+         * Returns true when it asked the engine to reset the TCP connections opened before [changedAt]; the engine
+         * then reports the written RSTs to [onResetBeforeDone].
          */
-        fun onUnderlyingNetworkSwitched(previous: Network?, network: Network, type: NetworkManager.ConnectionType, changedAt: Long)
+        fun onUnderlyingNetworkSwitched(previous: Network?, network: Network, type: NetworkManager.ConnectionType, changedAt: Long): Boolean
     }
 
-    /** The VpnService that established the VPN. Called on the network thread, at once on every change. */
+    /** The VpnService that established the VPN. Called on the network thread on every change, see [deferUnderlyingNetwork]. */
     interface UnderlyingNetworkObserver {
         fun onUnderlyingNetwork(network: Network?)
     }
@@ -91,6 +94,13 @@ class ConnectionStateManager @Inject constructor(
     private var observer: UnderlyingNetworkObserver? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var initialEventPending = false
+    // A switch whose underlying network the VPN is told only after the reset, see deferUnderlyingNetwork
+    private var pendingUnderlying: Network? = null
+    // SystemClock.uptimeMillis() of the switch, its changedAt (the reset's "before") and the engine's reset report
+    private var pendingSince = 0L
+    private var pendingChangedAt = 0L
+    private var pendingResetDoneAt = 0L
+    private var pendingResetCount = 0
     // Debug logs only: capability updates of the same network come every few seconds
     private val sameNetworkLog = Logger.Throttle()
 
@@ -126,10 +136,25 @@ class ConnectionStateManager @Inject constructor(
     fun stop(listener: Listener) = onHandler {
         // A tunnel that was started again in the meantime has its own listener and keeps the callback
         if (this.listener !== listener) {
-            Logger.debug { "[Conn] Ignoring stop from a previous tunnel" }
+            Logger.debug { "[Conn] Ignoring stop from ${if (this.listener == null) "a tunnel already stopped" else "a previous tunnel"}" }
             return@onHandler
         }
-        this.listener = null
+        stopWatching("tunnel stopped")
+    }
+
+    /**
+     * The VPN was revoked (another VPN took over, or the user revoked the permission). The server stays bound, so
+     * [stop] may never come: stop following the default network now. A new start registers the callback again.
+     */
+    fun onVpnRevoked() = onHandler {
+        if (listener == null && networkCallback == null) return@onHandler
+        stopWatching("VPN revoked")
+    }
+
+    // Network thread only
+    private fun stopWatching(why: String) {
+        listener = null
+        cancelPendingUnderlying(why)
         underlyingNetwork = null
         underlyingDeclared = false
         handler.removeCallbacksAndMessages(RECHECK_TOKEN)
@@ -141,7 +166,28 @@ class ConnectionStateManager @Inject constructor(
             }
         }
         networkCallback = null
-        Logger.debug { "[Conn] Stopped watching the default network" }
+        Logger.debug { "[Conn] Stopped watching the default network ($why)" }
+    }
+
+    /**
+     * Called on the tunnel thread when the engine wrote the RSTs of a reset of the connections opened before
+     * [before]: [reset] connections got one, at [doneAt] (all SystemClock.uptimeMillis). See [deferUnderlyingNetwork].
+     */
+    fun onResetBeforeDone(before: Long, reset: Int, doneAt: Long) {
+        handler.post {
+            val network = pendingUnderlying
+            // An older reset (requests merge into the latest), or nothing waits for it anymore
+            if (network == null || before < pendingChangedAt) return@post
+            pendingResetDoneAt = doneAt
+            pendingResetCount = reset
+            handler.removeCallbacksAndMessages(UNDERLYING_TOKEN)
+            if (reset == 0) {
+                applyPendingUnderlying()
+            } else {
+                val at = minOf(doneAt + UNDERLYING_AFTER_RESET_MS, pendingSince + UNDERLYING_MAX_WAIT_MS)
+                handler.postAtTime({ applyPendingUnderlying() }, UNDERLYING_TOKEN, at)
+            }
+        }
     }
 
     /** Adds the VpnService that established the VPN. While a tunnel runs, it is told the current network at once. */
@@ -221,8 +267,9 @@ class ConnectionStateManager @Inject constructor(
      * - API 31+: registerBestMatchingNetworkCallback for INTERNET + NOT_VPN. Android picks the best match the same
      *   way it picks the default network, so this follows the system default.
      * - API 24-30: registerNetworkCallback for INTERNET + NOT_VPN keeps every real network. The default among them
-     *   is Athena's activeNetwork (correct for an app excluded from the VPN), checked again [RECHECK_MS] after each
-     *   event because the active network can change just after the callback ([NetworkManager.pickUnderlying]).
+     *   is Athena's activeNetwork (correct for an app excluded from the VPN), checked again 200 ms and 1.5 s
+     *   ([RECHECK_MS]) after each event because the active network can change after the callback
+     *   ([NetworkManager.pickUnderlying]). A change a re-check finds counts from the event that scheduled it.
      */
     private fun watchDefaultNetwork() {
         val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
@@ -258,7 +305,10 @@ class ConnectionStateManager @Inject constructor(
 
     // Network thread only. The callback's current default network and its capabilities.
     // [previousGone]: the callback already knows the previous network disconnected (API 24-30 onLost).
-    private fun onDefaultNetwork(network: Network, capabilities: NetworkCapabilities?, event: String, previousGone: Boolean = false) {
+    // [eventAt]: SystemClock.uptimeMillis() of the event that caused this check. On API 24-30 a re-check can notice a
+    // change up to RECHECK_MS later; connections the apps opened since then on the new network must not be reset.
+    private fun onDefaultNetwork(network: Network, capabilities: NetworkCapabilities?, event: String, previousGone: Boolean = false,
+                                 eventAt: Long = SystemClock.uptimeMillis()) {
         val caps = capabilities ?: networkManager.getCapabilities(network)
         if (caps == null) {
             // Gone already, or not known yet: onCapabilitiesChanged or onLost follows
@@ -288,8 +338,9 @@ class ConnectionStateManager @Inject constructor(
         // The rules follow the new network at once, before anything else
         currentConnectionType = type
         underlyingNetwork = network
-        changedAt = SystemClock.uptimeMillis()
+        changedAt = maxOf(eventAt, changedAt)
         dnsUnanswered = 0
+        val late = if (event.startsWith("recheck")) ", counted from the event ${SystemClock.uptimeMillis() - changedAt} ms ago" else ""
 
         val listener = listener
         val previousCaps = if (previous != null && previous != network && !previousGone) networkManager.getCapabilities(previous) else null
@@ -300,22 +351,76 @@ class ConnectionStateManager @Inject constructor(
             // The old network went away, or Android left it because it stopped working (weak Wi-Fi): every
             // connection on it is dead
             val why = if (previousCaps == null) "gone" else "still connected but ${networkManager.describe(previousCaps)}"
-            Logger.debug { "[Conn] Underlying default network $network ${networkManager.describe(caps)} (lost: previous $previous $why, $previousType->$type) by $event" }
+            Logger.debug { "[Conn] Underlying default network $network ${networkManager.describe(caps)} (lost: previous $previous $why, $previousType->$type$late) by $event" }
             listener?.onUnderlyingNetworkLost(previous)
         } else {
             val from = if (previous != null && previous != network) previous else null
             Logger.debug {
                 "[Conn] Underlying default network $network ${networkManager.describe(caps)} (switch: from " +
                     "${if (from != null) "$from ${networkManager.describe(previousCaps)} still up" else if (previous == null) "none" else "the same network"}" +
-                    ", $previousType->$type${if (initial) ", first event of the callback" else ""}) by $event"
+                    ", $previousType->$type${if (initial) ", first event of the callback" else ""}$late) by $event"
             }
-            listener?.onUnderlyingNetworkSwitched(from, network, type, changedAt)
+            val resetRequested = listener?.onUnderlyingNetworkSwitched(from, network, type, changedAt) == true
+            // Only when the VPN was told the old network: with null it already follows the default by itself
+            if (from != null && resetRequested && underlyingDeclared) {
+                deferUnderlyingNetwork(network)
+                return
+            }
         }
         setUnderlyingNetwork(network, "change")
     }
 
+    /**
+     * Network thread only. A switch from a network that still works (back on Wi-Fi from mobile data): the engine
+     * resets the connections opened before it, and the VPN is told the new network only once the RSTs are written,
+     * [UNDERLYING_AFTER_RESET_MS] after the engine's report ([onResetBeforeDone]), at most [UNDERLYING_MAX_WAIT_MS]
+     * after the switch, at once if nothing was reset.
+     *
+     * The VPN's capability change (transport, metered) is the only network event the apps behind the VPN get at such
+     * a switch. GMS (FCM) reconnects at once only when that change reaches it after it handled the RST of its old
+     * connection; the other way round it waits 5-22 s for its reconnect alarm. Told 1-10 ms after the reset, Android
+     * 17 often delivered the change first. Until then the VPN still shows the old network's transport and metered
+     * state; the rules and the engine already use the new network. A newer change supersedes the pending one.
+     */
+    private fun deferUnderlyingNetwork(network: Network) {
+        cancelPendingUnderlying("a newer switch to $network")
+        val now = SystemClock.uptimeMillis()
+        pendingUnderlying = network
+        pendingSince = now
+        pendingChangedAt = changedAt
+        pendingResetDoneAt = 0L
+        pendingResetCount = 0
+        handler.postAtTime({ applyPendingUnderlying() }, UNDERLYING_TOKEN, now + UNDERLYING_MAX_WAIT_MS)
+        Logger.debug { "[Conn] Telling the VPN its underlying network $network after the reset (switch): $UNDERLYING_AFTER_RESET_MS ms after the engine wrote the RSTs, at most $UNDERLYING_MAX_WAIT_MS ms" }
+    }
+
     // Network thread only
-    private fun onDefaultNetworkLost(network: Network) {
+    private fun applyPendingUnderlying() {
+        val network = pendingUnderlying ?: return
+        pendingUnderlying = null
+        handler.removeCallbacksAndMessages(UNDERLYING_TOKEN)
+        val now = SystemClock.uptimeMillis()
+        Logger.debug {
+            if (pendingResetDoneAt > 0) {
+                "[Conn] Underlying network $network applied ${now - pendingResetDoneAt} ms after the reset (switch): " +
+                    "$pendingResetCount TCP connections reset, ${now - pendingSince} ms after the switch"
+            } else {
+                "[Conn] Underlying network $network applied ${now - pendingSince} ms after the switch without a reset report from the engine (switch)"
+            }
+        }
+        setUnderlyingNetwork(network, "switch, after the reset")
+    }
+
+    // Network thread only
+    private fun cancelPendingUnderlying(why: String) {
+        val network = pendingUnderlying ?: return
+        pendingUnderlying = null
+        handler.removeCallbacksAndMessages(UNDERLYING_TOKEN)
+        Logger.debug { "[Conn] Underlying network $network superseded ${SystemClock.uptimeMillis() - pendingSince} ms after the switch: $why" }
+    }
+
+    // Network thread only
+    private fun onDefaultNetworkLost(network: Network, eventAt: Long = SystemClock.uptimeMillis()) {
         initialEventPending = false
         if (network != underlyingNetwork) {
             Logger.debug { "[Conn] Underlying default network ${underlyingNetwork ?: "none"} (same: $network lost, not the default)" }
@@ -325,7 +430,7 @@ class ConnectionStateManager @Inject constructor(
         // No network until the next onAvailable: the rules fail closed (AppRule)
         currentConnectionType = NetworkManager.ConnectionType.NONE
         underlyingNetwork = null
-        changedAt = SystemClock.uptimeMillis()
+        changedAt = maxOf(eventAt, changedAt)
         dnsUnanswered = 0
         Logger.debug { "[Conn] Underlying default network none (lost: $network is gone, $previousType->NONE)" }
         listener?.onUnderlyingNetworkLost(network)
@@ -334,6 +439,7 @@ class ConnectionStateManager @Inject constructor(
 
     // Network thread only
     private fun setUnderlyingNetwork(network: Network?, why: String) {
+        cancelPendingUnderlying("$why, now ${network ?: "none"}")
         underlyingDeclared = network != null || why == "no network"
         val observer = observer
         if (observer == null) {
@@ -374,41 +480,52 @@ class ConnectionStateManager @Inject constructor(
         // Network thread only
         private val networks = HashMap<Network, NetworkCapabilities>()
 
+        // SystemClock.uptimeMillis() of the last event, which scheduled the re-checks
+        private var lastEventAt = 0L
+
         override fun onAvailable(network: Network) {
             // Android 7 does not always follow onAvailable with onCapabilitiesChanged
             val caps = networkManager.getCapabilities(network)
+            val at = SystemClock.uptimeMillis()
             onHandlerIfCurrent {
                 if (caps != null) networks[network] = caps
-                update("onAvailable", gone = null)
+                update("onAvailable", gone = null, at)
             }
         }
 
         override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+            val at = SystemClock.uptimeMillis()
             onHandlerIfCurrent {
                 networks[network] = networkCapabilities
-                update("onCapabilitiesChanged", gone = null)
+                update("onCapabilitiesChanged", gone = null, at)
             }
         }
 
         override fun onLost(network: Network) {
+            val at = SystemClock.uptimeMillis()
             onHandlerIfCurrent {
                 networks.remove(network)
-                update("onLost", gone = network)
+                update("onLost", gone = network, at)
             }
         }
 
-        private fun update(event: String, gone: Network?) {
+        // [eventAt] is null for a re-check, which counts a change from the event that scheduled it
+        private fun update(event: String, gone: Network?, eventAt: Long?) {
+            if (eventAt != null) lastEventAt = eventAt
             val network = networkManager.pickUnderlying(networks)
             if (network == null) {
-                underlyingNetwork?.let { onDefaultNetworkLost(it) }
+                underlyingNetwork?.let { onDefaultNetworkLost(it, lastEventAt) }
             } else {
-                onDefaultNetwork(network, networks[network], event, previousGone = gone != null && gone == underlyingNetwork)
+                onDefaultNetwork(network, networks[network], event, previousGone = gone != null && gone == underlyingNetwork, eventAt = lastEventAt)
             }
-            // The active network can switch just after the event that caused it: look again shortly
-            handler.removeCallbacksAndMessages(RECHECK_TOKEN)
-            if (event != "recheck") {
-                handler.postAtTime({ if (networkCallback === this) update("recheck", gone = null) }, RECHECK_TOKEN,
-                    SystemClock.uptimeMillis() + RECHECK_MS)
+            // The active network can switch just after the event that caused it, or much later when system_server is
+            // slow: look again shortly, and once more later (review d3)
+            if (eventAt != null) {
+                handler.removeCallbacksAndMessages(RECHECK_TOKEN)
+                for (delay in RECHECK_MS) {
+                    handler.postAtTime({ if (networkCallback === this) update("recheck +$delay ms", gone = null, eventAt = null) },
+                        RECHECK_TOKEN, SystemClock.uptimeMillis() + delay)
+                }
             }
         }
 
@@ -424,8 +541,13 @@ class ConnectionStateManager @Inject constructor(
         // At most one report per network in this time
         const val REPORT_INTERVAL_MS = 60_000L
         // API 24-30: the active network is checked again this long after each callback event
-        const val RECHECK_MS = 200L
+        val RECHECK_MS = longArrayOf(200L, 1_500L)
         val RECHECK_TOKEN = Any()
+        // After a switch from a network that still works, the VPN is told the new network this long after the engine
+        // wrote the RSTs (GMS handles an RST in 9-77 ms), and at most this long after the switch
+        const val UNDERLYING_AFTER_RESET_MS = 200L
+        const val UNDERLYING_MAX_WAIT_MS = 500L
+        val UNDERLYING_TOKEN = Any()
     }
 }
 

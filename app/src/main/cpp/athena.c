@@ -480,6 +480,27 @@ void report_upstream_dns(const struct arguments *args, jboolean answered, long l
     (*env)->DeleteLocalRef(env, cls);
 }
 
+// Tells TunnelManager.onResetBeforeDone that the RSTs for the TCP sessions created before before (get_ms) are written
+// to the tun: reset sessions got one, at done (get_ms). Event thread only, outside ctx->lock.
+void report_reset_before(const struct arguments *args, long long before, int reset, long long done) {
+    if (args == NULL || args->env == NULL || args->instance == NULL) {
+        return;
+    }
+
+    JNIEnv *env = args->env;
+
+    jclass cls = (*env)->GetObjectClass(env, args->instance);
+    if (cls == NULL) return;
+
+    jmethodID methodID = (*env)->GetMethodID(env, cls, "onResetBeforeDone", "(JIJ)V");
+    if (methodID != NULL)
+        (*env)->CallVoidMethod(env, args->instance, methodID, (jlong) before, (jint) reset, (jlong) done);
+    if ((*env)->ExceptionCheck(env))
+        (*env)->ExceptionClear(env);
+
+    (*env)->DeleteLocalRef(env, cls);
+}
+
 jboolean filter_icmp_packet(const struct arguments *args, const uint8_t *data, size_t length, const char *direction) {
     if (args == NULL || args->env == NULL || args->instance == NULL || data == NULL) {
         return JNI_TRUE; // Allow packet if arguments are invalid

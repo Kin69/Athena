@@ -237,6 +237,10 @@ class VpnConnectionClient : VpnService(), ConnectionStateManager.UnderlyingNetwo
 
     override fun onRevoke() {
         Logger.debug { "[Vpn] onRevoke: another VPN took over or the user revoked the permission" }
+        // The server stays bound, so its stop may never come: stop following the default network and drop a
+        // pending underlying-network call for the dead VPN (review minor 12)
+        connectionStateManager.removeUnderlyingNetworkObserver(this)
+        connectionStateManager.onVpnRevoked()
         super.onRevoke()
     }
 

@@ -56,6 +56,13 @@ class TunnelManager(
     @Volatile
     var upstreamDnsListener: ((answered: Boolean, sentAt: Long) -> Unit)? = null
 
+    /**
+     * Told on the tunnel thread when the engine wrote the RSTs asked for by [resetSessionsBefore]: [reset] TCP
+     * connections created before [before] got one, at [doneAt] (all SystemClock.uptimeMillis).
+     */
+    @Volatile
+    var resetBeforeListener: ((before: Long, reset: Int, doneAt: Long) -> Unit)? = null
+
 
     fun initialize(): Boolean {
         contextPtr = jni_init(Build.VERSION.SDK_INT)
@@ -199,6 +206,15 @@ class TunnelManager(
             upstreamDnsListener?.invoke(answered, sentAt)
         } catch (e: Exception) {
             Logger.error("Error handling the upstream DNS state: ${e.message}", e)
+        }
+    }
+
+    // Called by the native engine on the tunnel thread, see resetBeforeListener
+    private fun onResetBeforeDone(before: Long, reset: Int, doneAt: Long) {
+        try {
+            resetBeforeListener?.invoke(before, reset, doneAt)
+        } catch (e: Exception) {
+            Logger.error("Error handling the end of a reset: ${e.message}", e)
         }
     }
 

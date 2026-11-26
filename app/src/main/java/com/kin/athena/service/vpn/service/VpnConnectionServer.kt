@@ -24,7 +24,9 @@ import android.content.Intent
 import android.net.Network
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
@@ -50,6 +52,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.*
 import java.io.IOException
 import java.net.InetAddress
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import kotlin.coroutines.coroutineContext
 
@@ -273,7 +276,7 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
     }
 
     // ConnectionStateManager.Listener, network thread
-    override fun onUnderlyingNetworkSwitched(previous: Network?, network: Network, type: NetworkManager.ConnectionType, changedAt: Long) {
+    override fun onUnderlyingNetworkSwitched(previous: Network?, network: Network, type: NetworkManager.ConnectionType, changedAt: Long): Boolean {
         // The old network still works, but Android stops using it: after a short linger it black-holes the
         // connections on it without telling anyone. Every TCP connection opened before the change was connect()ed on
         // it, so reset those now; the apps reconnect on the new network. Connections opened since keep running,
@@ -284,9 +287,11 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
                 "${if (previous != null) "resetting the TCP connections opened before the change and" else "keeping sessions,"} " +
                 "resetting the TCP connections of ${uids.size} uids blocked on $type${if (uids.isNotEmpty()) ": ${uids.joinToString(",")}" else ""}"
         }
-        if (isShuttingDown || !::tunnelManager.isInitialized) return
+        if (isShuttingDown || !::tunnelManager.isInitialized) return false
         if (previous != null) tunnelManager.resetSessionsBefore(changedAt)
         if (uids.isNotEmpty()) tunnelManager.resetSessions(uids)
+        // The engine reports the written RSTs to ConnectionStateManager.onResetBeforeDone
+        return previous != null
     }
 
 
@@ -364,6 +369,7 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
         } else {
             tunnelManager.upstreamDnsListener = connectionStateManager::onUpstreamDns
         }
+        tunnelManager.resetBeforeListener = connectionStateManager::onResetBeforeDone
         
         if (!tunnelManager.initialize()) {
             Logger.error("Failed to initialize Tunnel Manager")
@@ -425,7 +431,37 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
             tunnelManager.stop()
             tunnelManager.release()
         }
-        vpnInterface?.close()
+        closeTunAfterEngine()
+    }
+
+    /**
+     * Closes the tun once the engine's loop has ended (review d2): the loop can still be finishing an iteration that
+     * writes to the tun after jni_stop/jni_done, and a closed fd number can already belong to another file or socket.
+     * The loop ends within milliseconds of jni_stop; if it does not, the tun is closed after [TUN_CLOSE_TIMEOUT_MS]
+     * anyway, so the VPN never stays up.
+     */
+    private fun closeTunAfterEngine() {
+        val tun = vpnInterface ?: return
+        vpnInterface = null
+        val job = netGuardJob
+        val closed = AtomicBoolean(false)
+        val requestedAt = SystemClock.uptimeMillis()
+        val close = { why: String ->
+            if (closed.compareAndSet(false, true)) {
+                try {
+                    tun.close()
+                    Logger.debug { "[Vpn] Closed the tun ${SystemClock.uptimeMillis() - requestedAt} ms after the stop: $why" }
+                } catch (e: IOException) {
+                    Logger.error("Error closing the tun: ${e.localizedMessage}", e)
+                }
+            }
+        }
+        if (job == null || job.isCompleted) {
+            close("no engine loop running")
+            return
+        }
+        job.invokeOnCompletion { close("the engine loop ended") }
+        Handler(Looper.getMainLooper()).postDelayed({ close("the engine loop did not end within $TUN_CLOSE_TIMEOUT_MS ms") }, TUN_CLOSE_TIMEOUT_MS)
     }
 
     override fun onDestroy() {
@@ -477,6 +513,11 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
         } else {
             Logger.warn("Vpn server is not running")
         }
+    }
+
+    private companion object {
+        // closeTunAfterEngine: the longest wait for the engine's loop to end before the tun is closed anyway
+        const val TUN_CLOSE_TIMEOUT_MS = 2_000L
     }
 }
 
