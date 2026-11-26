@@ -49,6 +49,7 @@ class ScreenRule @Inject constructor(
                 ifSuccess = { settings ->
                     blockWhenScreenOffData = settings.blockCellularWhenScreenOff
                     blockWhenScreenOffWifi = settings.blockWifiWhenScreenOff
+                    Logger.debug { "[Rules] Screen-off rules: blockWifi=$blockWhenScreenOffWifi blockCell=$blockWhenScreenOffData screen=${screenStateManager.currentScreenStatus}" }
                 }
             )
         }

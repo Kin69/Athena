@@ -17,6 +17,7 @@
 
 package com.kin.athena.service.firewall.rule
 
+import com.kin.athena.core.logging.Logger
 import com.kin.athena.domain.model.Ip
 import com.kin.athena.domain.usecase.log.LogUseCases
 import com.kin.athena.domain.usecase.networkFilter.NetworkFilterUseCases
@@ -44,6 +45,7 @@ class FilterRule @Inject constructor(
                 ifSuccess = {
                     it.collect { ip ->
                         ips = ip
+                        Logger.debug { "[Rules] IP filter list loaded: ${ip.size} entries" }
                     }
                 }
             )

@@ -59,6 +59,8 @@ class RuleHandler @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     var allowLocal = false
+    // Debug builds only: one decision log per flow and result, see logDecision
+    private val decisionLog = Logger.Throttle()
 
     init {
         val filter = IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION)
@@ -72,6 +74,7 @@ class RuleHandler @Inject constructor(
             preferencesUseCases.loadSettings.execute().fold(
                 ifSuccess = { settings ->
                    allowLocal = settings.allowLocal
+                   Logger.debug { "[Rules] allowLocal=${settings.allowLocal}, rules=${rules.map { it.javaClass.simpleName }}" }
                 }
             )
         }
@@ -82,18 +85,21 @@ class RuleHandler @Inject constructor(
     }
 
     suspend fun updateBlocklist(progressCallback: (suspend (Int) -> Unit)? = null) {
+        Logger.debug { "[Rules] Updating the DNS blocklist" }
         rules.filterIsInstance<DNSRule>().forEach {
             it.updateBlocklist(progressCallback)
         }
     }
 
     fun updateLogs(enabled: Boolean) {
+        Logger.debug { "[Rules] Packet logs enabled=$enabled" }
         rules.filterIsInstance<LogRule>().forEach {
             it.updateLogStatus(enabled)
         }
     }
     
     fun setDnsBlocking(enabled: Boolean) {
+        Logger.debug { "[Rules] DNS blocking enabled=$enabled" }
         rules.filterIsInstance<DNSRule>().forEach { dnsRule ->
             if (enabled) {
                 dnsRule.enableDnsBlocking()
@@ -108,6 +114,7 @@ class RuleHandler @Inject constructor(
     }
 
     fun setCustomDomainRules(enabled: Boolean) {
+        Logger.debug { "[Rules] Custom domain rules enabled=$enabled" }
         rules.filterIsInstance<CustomDomainRule>().forEach { customDomainRule ->
             if (enabled) {
                 customDomainRule.enableCustomDomainRules()
@@ -122,18 +129,21 @@ class RuleHandler @Inject constructor(
     }
 
     fun updateScreenSetting() {
+        Logger.debug { "[Rules] Reloading the screen-off rules" }
         rules.filterIsInstance<ScreenRule>().forEach {
             it.updateRules()
         }
     }
 
     fun updateHttpSettings() {
+        Logger.debug { "[Rules] Reloading the HTTP rules" }
         rules.filterIsInstance<HTTPRule>().forEach {
             it.updateHTTPStatus()
         }
     }
 
     fun updateAppRules(updatedApplication: Application? = null) {
+        Logger.debug { "[Rules] Reloading app and IP rules${updatedApplication?.let { " after a change of ${it.packageID}: wifi=${it.internetAccess} cell=${it.cellularAccess}" } ?: ""}" }
         rules.filterIsInstance<AppRule>().forEach {
             it.observePackages(updatedApplication)
         }
@@ -149,21 +159,44 @@ class RuleHandler @Inject constructor(
 
         if (allowLocal && dnsModel == null) {
             if (isLocalIPv4(packet.destinationIP)) {
+                if (Logger.isDebug) logDecision(packet, null, FirewallResult.ACCEPT, "local")
                 return Triple(true, packet.uid, FirewallResult.ACCEPT)
             }
         }
 
         var result = FirewallResult.ACCEPT
+        var decidedBy: FirewallRule? = null
         packet.apply {
             for (rule in rules.dropLast(1)) {
                 val ruleResult = rule.check(packet, dnsModel, logUseCases, result)
                 if (result == FirewallResult.ACCEPT && ruleResult != FirewallResult.ACCEPT) {
                     result = ruleResult
+                    decidedBy = rule
                 }
             }
         }
 
         rules.last().check(packet, dnsModel, logUseCases, result)
+        if (Logger.isDebug) logDecision(packet, dnsModel, result, decidedBy?.javaClass?.simpleName ?: "none")
         return Triple(result == FirewallResult.ACCEPT, packet.uid, result)
+    }
+
+    /**
+     * Debug builds only. Called for every checked packet: a TCP SYN, but every UDP packet, so each flow (protocol,
+     * source port, destination) is logged once per result and then at most once a minute.
+     */
+    private fun logDecision(packet: FireWallModel, dnsModel: DNSModel?, result: FirewallResult, decidedBy: String) {
+        val protocol = when (packet.protocol) {
+            NetworkConstants.TCP_PROTOCOL -> "TCP"
+            NetworkConstants.UDP_PROTOCOL -> "UDP"
+            NetworkConstants.ICMP_PROTOCOL -> "ICMP"
+            else -> packet.protocol.toString()
+        }
+        val key = "$protocol:${packet.sourcePort}>${packet.destinationIP}:${packet.destinationPort}:$result"
+        if (!decisionLog.shouldLog(key)) return
+        Logger.debug {
+            "[Pkt] $protocol uid=${packet.uid} :${packet.sourcePort} -> ${packet.destinationIP}:${packet.destinationPort}" +
+                "${dnsModel?.domainName?.let { " dns=$it" } ?: ""} net=${packet.networkType} -> $result by=$decidedBy"
+        }
     }
 }

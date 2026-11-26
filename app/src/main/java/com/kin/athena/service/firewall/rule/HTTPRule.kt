@@ -51,6 +51,7 @@ class HTTPRule @Inject constructor(
                 ifSuccess = { settings ->
                     blockHTTP = settings.blockPort80
                     allowLocal = settings.allowLocal
+                    Logger.debug { "[Rules] HTTP rule: blockPort80=$blockHTTP allowLocal=$allowLocal" }
                 },
                 ifFailure = { error ->
                     Logger.error("Failed to load settings: ${error.message}")

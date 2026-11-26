@@ -17,6 +17,7 @@
 
 package com.kin.athena.service.firewall.rule
 
+import android.os.SystemClock
 import com.kin.athena.core.logging.Logger
 import com.kin.athena.domain.usecase.log.LogUseCases
 import com.kin.athena.presentation.screens.settings.subSettings.dns.hosts.RuleDatabase
@@ -31,7 +32,10 @@ class DNSRule @Inject constructor(
     private var isDnsBlockingEnabled = true
 
     suspend fun updateBlocklist(progressCallback: (suspend (Int) -> Unit)? = null) {
+        val startedAt = SystemClock.uptimeMillis()
+        Logger.debug { "[Blocklist] DNS rule reloading the blocklist, blocking=$isDnsBlockingEnabled" }
         ruleDatabase.initialize(progressCallback = progressCallback)
+        Logger.debug { "[Blocklist] DNS rule blocklist reloaded in ${SystemClock.uptimeMillis() - startedAt} ms" }
     }
     
     fun enableDnsBlocking() {

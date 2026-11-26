@@ -17,6 +17,7 @@
 
 package com.kin.athena.service.firewall.rule
 
+import android.os.SystemClock
 import com.kin.athena.core.logging.Logger
 import com.kin.athena.data.service.ConnectionStateManager
 import com.kin.athena.data.service.NetworkManager
@@ -46,6 +47,7 @@ class AppRule @Inject constructor(
 
     fun observePackages(updatedApplication: Application?) {
         CoroutineScope(Dispatchers.IO).launch {
+            val startedAt = SystemClock.uptimeMillis()
             val packagesList = applicationUseCases.getApplications.execute()
             packagesList.fold(
                 ifSuccess = { applications ->
@@ -54,6 +56,14 @@ class AppRule @Inject constructor(
 
                     wifiBlockedUids = wifiBlocked
                     cellularBlockedUids = cellularBlocked
+                    Logger.debug {
+                        "[Rules] App rules loaded in ${SystemClock.uptimeMillis() - startedAt} ms: apps=${applications.size} " +
+                            "wifiBlocked=${wifiBlocked.size} cellBlocked=${cellularBlocked.size} net=${networkConnectionStateManager.getCurrentConnectionType()}" +
+                            (updatedApplication?.let { app ->
+                                val loaded = applications.firstOrNull { it.packageID == app.packageID }
+                                " changed=${app.packageID} uid=${app.uid} wifi=${loaded?.internetAccess} cell=${loaded?.cellularAccess}"
+                            } ?: "")
+                    }
                 }
             )
         }

@@ -48,6 +48,7 @@ class LogRule @Inject constructor(
     fun updateLogStatus(enabled: Boolean? = null) {
         if (enabled != null) {
             isLogEnabled = enabled
+            Logger.debug { "[Rules] Packet logging enabled=$enabled" }
         } else {
             externalScope.launch(Dispatchers.IO) {
                 preferencesUseCases.loadSettings.execute().fold(
@@ -55,6 +56,7 @@ class LogRule @Inject constructor(
                         mutex.withLock {
                             isLogEnabled = settings.logs
                         }
+                        Logger.debug { "[Rules] Packet logging enabled=${settings.logs} (settings)" }
                     },
                     ifFailure = { error ->
                         Logger.error("Failed to load settings: ${error.message}")

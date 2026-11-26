@@ -59,6 +59,8 @@ class ConnectivityUtils @Inject constructor(
     private val context: Context
 ) {
     private val connectivityManager = ContextCompat.getSystemService(context, ConnectivityManager::class.java)
+    // Debug builds only. Called for every checked packet, so each kind of failure is logged once a minute.
+    private val failureLog = Logger.Throttle()
 
     fun getConnectionOwnerUid(packet: FireWallModel): Int {
         if (connectivityManager == null) {
@@ -80,16 +82,21 @@ class ConnectivityUtils @Inject constructor(
             val uid = method.invoke(connectivityManager, packet.protocol, localInetSocketAddress, remoteInetSocketAddress) as? Int ?: INVALID_UID
             uid
         } catch (e: NoSuchMethodException) {
+            if (failureLog.shouldLog("no-method")) Logger.debug { "[Rules] No getConnectionOwnerUid, reading /proc/net instead" }
             try {
                 val uid = getUidForConnectionOldMethod(packet)
                 return uid
             } catch (e: Exception) {
+                if (failureLog.shouldLog(e.javaClass)) Logger.debug(e) { "[Rules] Cannot read the connection owner from /proc/net" }
                 INVALID_UID
             }
         } catch (e: IllegalAccessException) {
             Logger.error("Illegal access to method: ${e.message}")
             INVALID_UID
         } catch (e: InvocationTargetException) {
+            if (failureLog.shouldLog(e.targetException?.javaClass ?: e.javaClass)) {
+                Logger.debug(e.targetException) { "[Rules] getConnectionOwnerUid failed for ${packet.destinationIP}:${packet.destinationPort}" }
+            }
             INVALID_UID
         } catch (e: Exception) {
             Logger.error("Unexpected error: ${e.message}")
