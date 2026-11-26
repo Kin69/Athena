@@ -133,6 +133,7 @@ class ShizukuConnectionService : Service(), CoroutineScope by CoroutineScope(Dis
     }
 
     override fun updateRules(application: Application?) {
+        Logger.debug { "[Shizuku] updateRules ${application?.packageID ?: "all (ignored)"} wifi=${application?.internetAccess} cell=${application?.cellularAccess}" }
         application?.let { app ->
             launch {
                 setAppNetworking(app)

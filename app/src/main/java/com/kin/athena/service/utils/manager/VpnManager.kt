@@ -17,6 +17,7 @@
 
 package com.kin.athena.service.utils.manager
 
+import com.kin.athena.core.logging.Logger
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
@@ -40,6 +41,7 @@ import kotlinx.coroutines.launch
 
 object VpnManager {
     fun start(context: Context) {
+        Logger.debug { "[Vpn] VpnManager.start by ${Logger.caller()} prepared=${VpnService.prepare(context) == null}" }
         startVpnService(context)
     }
 
@@ -79,10 +81,12 @@ object VpnManager {
         }
 
         val vpnPermissionLauncher = rememberLauncherForActivityResult(contract = ActivityResultContracts.StartActivityForResult()) { result ->
+            Logger.debug { "[Vpn] VPN permission result=${result.resultCode} granted=${result.resultCode == Activity.RESULT_OK}" }
             onEnd(result.resultCode == Activity.RESULT_OK)
         }
 
         if (askForPermission.value) {
+            Logger.debug { "[Vpn] Asking for the VPN permission, intent=${vpnPermissionIntent != null}" }
             vpnPermissionLauncher.launch(vpnPermissionIntent)
             askForPermission.value = false
         }
@@ -102,6 +106,7 @@ object VpnManager {
     }
 
     fun stop(context: Context) {
+        Logger.debug { "[Vpn] VpnManager.stop by ${Logger.caller()}" }
         val stopVpnServiceIntent = Intent(context, VpnConnectionClient::class.java).apply {
             action = NetworkConstants.ACTION_STOP_VPN
         }

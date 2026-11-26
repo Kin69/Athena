@@ -17,6 +17,7 @@
 
 package com.kin.athena
 
+import android.os.Build
 import android.app.Activity
 import android.app.Application
 import android.content.Context
@@ -46,6 +47,11 @@ class App : Application(), Configuration.Provider {
         super.onCreate()
         App.applicationContext = this
         instance = this
+        Logger.debug {
+            val process = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) getProcessName() else "?"
+            "[App] onCreate ${BuildConfig.APPLICATION_ID} ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE}) ${BuildConfig.FLAVOR}/${BuildConfig.BUILD_TYPE} " +
+                "SDK ${Build.VERSION.SDK_INT} process=$process"
+        }
         
         // Initialize auto-update on app startup
         initializeAutoUpdate()
@@ -68,6 +74,7 @@ class App : Application(), Configuration.Provider {
             AutoUpdateManager.initializeAutoUpdate(this, defaultEnabled, defaultInterval)
         } catch (e: Exception) {
             // Silently handle initialization errors
+            Logger.debug(e) { "[App] Auto-update initialization failed" }
         }
     }
 

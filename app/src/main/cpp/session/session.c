@@ -78,6 +78,8 @@ void *handle_events(void *a) {
         args->ctx->stopping = 1;
     }
 
+    log_android(ANDROID_LOG_DEBUG, "Event loop started on tun %d, max sessions %d", args->tun, maxsessions);
+
     long long last_check = 0;
     while (!args->ctx->stopping) {
         int recheck = 0;
@@ -215,6 +217,9 @@ void *handle_events(void *a) {
                 break;
         }
     }
+
+    // Not stopping means an error ended the loop, for example the tun was closed under it
+    log_android(ANDROID_LOG_DEBUG, "Event loop on tun %d ended, stopping %d errno %d", args->tun, args->ctx->stopping, errno);
 
     if (epoll_fd >= 0)
         close(epoll_fd);

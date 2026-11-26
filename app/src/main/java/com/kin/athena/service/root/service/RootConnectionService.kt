@@ -84,6 +84,7 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
     private val serviceContext: Context = this
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Logger.debug { "[Root] onStartCommand action=${intent?.action} flags=$flags startId=$startId package=${intent?.getStringExtra("packageName")}" }
         intent?.action?.let { action ->
             when (action) {
                 NetworkConstants.ACTION_TOGGLE_CELLURAL -> toggleAccess(intent.getStringExtra("packageName"), AccessType.CELLULAR)
@@ -101,6 +102,10 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
                 packageManager.getApplication.execute(pkgName).fold(
                     ifSuccess = { application ->
                         val updatedApplication = application.toggleAccess(accessType)
+                        Logger.debug {
+                            "[Rules] Notification toggle $accessType $pkgName uid=${application.uid}: wifi ${application.internetAccess}->${updatedApplication.internetAccess} " +
+                                "cell ${application.cellularAccess}->${updatedApplication.cellularAccess}"
+                        }
                         packageManager.updateApplication.execute(updatedApplication).fold(
                             ifSuccess = {
                                 firewallRulesHandler.updateAppRules(updatedApplication)
@@ -109,6 +114,7 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
                         )
                     },
                     ifFailure = {
+                        Logger.debug { "[Rules] Toggle for unknown $pkgName, treating it as a new install" }
                         onAppInstalled(packageName)
                     }
                 )
@@ -146,6 +152,7 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
         val cellularRule = if (application.cellularAccess) "ACCEPT" else "REJECT"
 
         val shell = Shell.registerShell("su")
+        Logger.debug { "[Root] Rules for ${application.packageID} uid=${application.uid}: wifi=$wifiRule cell=$cellularRule" }
 
         shell.run("iptables -I EasyApps-wifi -m owner --uid-owner ${application.uid} -j $wifiRule -w")
         shell.run("iptables -I EasyApps-data -m owner --uid-owner ${application.uid} -j $cellularRule -w")
@@ -173,6 +180,7 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
     }
 
     override fun updateLogs(enabled: Boolean) {
+        Logger.debug { "[Root] updateLogs enabled=$enabled" }
         launch {
             packageManager.getApplications.execute().fold(
                 ifSuccess = {
@@ -187,7 +195,7 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
     }
 
     override fun updateScreen(value: Boolean) {
-
+        Logger.debug { "[Root] updateScreen value=$value: not supported in root mode" }
     }
 
     override suspend fun updateDomains(progressCallback: (suspend (Int) -> Unit)?) {
@@ -196,7 +204,7 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
     }
 
     override fun updateHttpSettings() {
-
+        Logger.debug { "[Root] updateHttpSettings: applied on the next start in root mode" }
     }
     
     override fun setDnsBlocking(enabled: Boolean) {
@@ -219,6 +227,10 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
         runBlocking {
             applicationsJob.await()
             ipsJob.await()
+        }
+        Logger.debug {
+            val apps = installedApplications
+            "[Root] Rules input: apps=${apps?.size} wifiBlocked=${apps?.count { !it.internetAccess }} cellBlocked=${apps?.count { !it.cellularAccess }} ips=${ipAddresses?.size}"
         }
 
         installedApplications?.let { apps ->
@@ -316,6 +328,7 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
     }
 
     private fun onStopIntent() {
+        Logger.debug { "[Root] onStopIntent domains=${domains?.size} by ${Logger.caller()}" }
         val hostsManager = domains?.let { HostsManager(appContext, it) }
 
         if (!domains.isNullOrEmpty()) {
@@ -332,6 +345,7 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
 
     override fun onDestroy() {
         super.onDestroy()
+        Logger.debug { "[Root] Service destroyed" }
         onStopIntent()
     }
 
@@ -378,6 +392,7 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
             )
         }
         applyIpRules("iptables", ips, commands)
+        Logger.debug { "[Root] EasyApps chain: ${commands.size} commands for ${internetApps.size} network apps, ${ips.size} IPs" }
 
         // Execute commands individually with progress updates
         executeCommandsWithProgress(commands)
@@ -545,6 +560,7 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
 
     @RequiresApi(Build.VERSION_CODES.M)
     override fun onAppInstalled(packageName: String?) {
+        Logger.debug { "[Pkg] Installed $packageName, showing the install notification (root mode)" }
         launch {
             packageName?.let {
                 showInstallNotification(
@@ -559,6 +575,7 @@ class RootConnectionService : Service(), CoroutineScope by CoroutineScope(Dispat
     }
 
     override fun onAppUninstalled(packageName: String?) {
+        Logger.debug { "[Pkg] Uninstalled $packageName" }
         // Handle app uninstallation logic here
     }
 

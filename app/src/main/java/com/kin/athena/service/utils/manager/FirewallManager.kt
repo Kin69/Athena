@@ -93,6 +93,7 @@ class FirewallManager @Inject constructor(
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
+            Logger.debug { "[Fw] Bound to ${className.shortClassName} mode=${firewallStateManager.mode}" }
             currentService.value = when (firewallStateManager.mode) {
                 FirewallMode.ROOT -> rootService
                 FirewallMode.VPN -> vpnService
@@ -102,27 +103,36 @@ class FirewallManager @Inject constructor(
         }
 
         override fun onServiceDisconnected(componentName: ComponentName) {
+            Logger.debug { "[Fw] Service ${componentName.shortClassName} disconnected (process died?)" }
             isServiceBound = false
         }
     }
 
     fun updateScreen(value: Boolean) {
+        Logger.debug { "[Fw] updateScreen value=$value service=${currentService.value?.javaClass?.simpleName}" }
         currentService.value?.updateScreen(value)
     }
 
     fun updateLogs(enabled: Boolean) {
+        Logger.debug { "[Fw] updateLogs enabled=$enabled service=${currentService.value?.javaClass?.simpleName}" }
         currentService.value?.updateLogs(enabled)
     }
 
     suspend fun updateDomains(progressCallback: (suspend (Int) -> Unit)? = null) {
+        Logger.debug { "[Fw] updateDomains service=${currentService.value?.javaClass?.simpleName}" }
         currentService.value?.updateDomains(progressCallback)
     }
 
     fun updateHttpSettings() {
+        Logger.debug { "[Fw] updateHttpSettings service=${currentService.value?.javaClass?.simpleName}" }
         currentService.value?.updateHttpSettings()
     }
 
     fun update(state: FirewallStatus) {
+        // Progress updates while loading are not logged
+        if (_rulesLoaded.value.name() != state.name()) {
+            Logger.debug { "[Fw] Status ${_rulesLoaded.value.name()} -> ${state.name()} by ${Logger.caller()}" }
+        }
         _rulesLoaded.value = state
     }
 
@@ -133,13 +143,15 @@ class FirewallManager @Inject constructor(
                 FirewallMode.VPN -> Intent(context, VpnConnectionServer::class.java)
                 FirewallMode.SHIZUKU -> Intent(context, ShizukuConnectionService::class.java)
             }
-            context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+            val bound = context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+            Logger.debug { "[Fw] bindService(${intent.component?.shortClassName}) mode=${firewallStateManager.mode} -> $bound" }
         } catch (e: IllegalArgumentException) {
             Logger.debug("Cannot bind service: ${e.message}")
         }
     }
 
     private fun unbindService() {
+        Logger.debug { "[Fw] unbindService bound=$isServiceBound" }
         if (isServiceBound) {
             context.unbindService(serviceConnection)
             isServiceBound = false
@@ -147,6 +159,7 @@ class FirewallManager @Inject constructor(
     }
 
     fun updateFirewallRules(application: Application?) {
+        Logger.debug { "[Fw] updateFirewallRules ${application?.packageID ?: "all"} bound=$isServiceBound by ${Logger.caller()}" }
         if (isServiceBound) {
             currentService.value?.updateRules(application) ?: Logger.warn("Cannot update rules: Service is not bound.")
         } else {
@@ -155,23 +168,27 @@ class FirewallManager @Inject constructor(
     }
 
     fun setFirewallMode(mode: FirewallMode) {
+        Logger.debug { "[Fw] setFirewallMode ${firewallStateManager.mode} -> $mode" }
         updateService()
         firewallStateManager.mode = mode
     }
 
     fun startFirewall() {
+        Logger.debug { "[Fw] startFirewall mode=${firewallStateManager.mode} status=${_rulesLoaded.value.name()} by ${Logger.caller()}" }
         updateService()
         bindService()
         currentService.value?.startService(context) ?: Logger.warn("Service not available for start.")
     }
 
     fun stopFirewall() {
+        Logger.debug { "[Fw] stopFirewall mode=${firewallStateManager.mode} status=${_rulesLoaded.value.name()} by ${Logger.caller()}" }
         updateService()
         unbindService()
         currentService.value?.stopService(context) ?: Logger.warn("Service not available for stop.")
     }
     
     fun setDnsBlocking(enabled: Boolean) {
+        Logger.debug { "[Fw] setDnsBlocking enabled=$enabled bound=$isServiceBound" }
         if (isServiceBound) {
             currentService.value?.setDnsBlocking(enabled) ?: Logger.warn("Cannot set DNS blocking: Service is not bound.")
         } else {

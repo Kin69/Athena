@@ -46,6 +46,7 @@ class NflogManager @Inject constructor(
     suspend fun start(packages: List<Application>, bypassSettings: Boolean = false) {
         preferencesUseCases.loadSettings.execute().fold(
             ifSuccess = { settings ->
+                Logger.debug { "[Root] NFLOG start: logs=${settings.logs} bypassSettings=$bypassSettings apps=${packages.size}" }
                 if (settings.logs || bypassSettings) {
                     startLog(settings, packages)
                 }
@@ -140,6 +141,7 @@ class NflogManager @Inject constructor(
 
 
     suspend fun stop() {
+        Logger.debug { "[Root] NFLOG stop pid=$PID" }
         killService(PID)
     }
 
