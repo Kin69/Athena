@@ -122,6 +122,7 @@ class DomainManagementViewModel @Inject constructor(
                 // Check for duplicates using the clean domain
                 val isDuplicate = customDomainRepository.isDomainExists(cleanDomain, isAllowlist)
                 if (isDuplicate) {
+                    Logger.debug { "[UI] Custom domain $cleanDomain already in ${if (isAllowlist) "allowlist" else "blocklist"}, not added" }
                     _errorMessage.value = "Domain already exists in ${if (isAllowlist) "allowlist" else "blocklist"}"
                     return@launch
                 }
@@ -162,6 +163,7 @@ class DomainManagementViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 customDomainRepository.updateDomainEnabled(domain.id, !domain.isEnabled)
+                Logger.debug { "[UI] Custom domain ${domain.domain} id=${domain.id} enabled=${domain.isEnabled}->${!domain.isEnabled}" }
                 Logger.info("Toggled domain enabled state: ${domain.domain}")
                 
             } catch (e: Exception) {

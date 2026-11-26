@@ -82,6 +82,7 @@ class HostsManager(private val context: Context, private val domains: List<Strin
                 verifyRevert()
                 Logger.info("Hosts file reverted to default version")
             } catch (e: Exception) {
+                Logger.debug(e) { "[Blocklist] Reverting the hosts file failed" }
                 throw HostsException("Failed to revert hosts file: ${e.message}", e)
             }
         } else {

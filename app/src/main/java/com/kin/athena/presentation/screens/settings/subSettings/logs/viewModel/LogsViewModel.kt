@@ -44,6 +44,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
+import com.kin.athena.core.logging.Logger
 import com.kin.athena.core.utils.PerformanceMonitor
 import kotlin.math.abs
 
@@ -85,6 +86,7 @@ class LogsViewModel @Inject constructor(
     }
 
     fun deleteLogs() {
+        Logger.debug { "[UI] Delete all packet logs" }
         viewModelScope.launch {
             logsUseCases.deleteLogs.execute()
             // Reset session start time when logs are deleted

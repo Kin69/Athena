@@ -35,6 +35,7 @@ object FileHelper{
         try {
             applicationContext.openFileInput(filename)
         } catch (e: FileNotFoundException) {
+            Logger.debug { "[Blocklist] No file $filename yet" }
             null
         }
 

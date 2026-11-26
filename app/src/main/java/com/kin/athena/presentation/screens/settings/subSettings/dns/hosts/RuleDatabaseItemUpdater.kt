@@ -49,12 +49,14 @@ class RuleDatabaseItemUpdate(
 
         file = FileHelper.getItemFile(item)
         if (file == null || !item.isDownloadable()) {
+            Logger.debug { "[Blocklist] ${item.title}: not downloadable, file=${file != null}" }
             return false
         }
 
         try {
             url = URL(item.data)
         } catch (e: MalformedURLException) {
+            Logger.debug(e) { "[Blocklist] ${item.title}: invalid URL ${item.data}" }
             worker.addError(item, context.getString(R.string.rule_invalid_url) + item.data)
             return false
         }
@@ -92,6 +94,7 @@ class RuleDatabaseItemUpdate(
         val singleWriterMultipleReaderFile = SingleWriterMultipleReaderFile(file!!)
         var connection: HttpURLConnection? = null
         worker.addBegin(item)
+        val startedAt = System.currentTimeMillis()
         try {
             connection = getHttpURLConnection(file!!, singleWriterMultipleReaderFile, url)
 
@@ -105,6 +108,7 @@ class RuleDatabaseItemUpdate(
             }
             downloadFile(file!!, singleWriterMultipleReaderFile, connection)
             Logger.info("${item.title}: Download completed successfully")
+            Logger.debug { "[Blocklist] ${item.title}: ${file?.length()} bytes in ${System.currentTimeMillis() - startedAt} ms" }
             worker.addDone(item)
         } catch (e: SocketTimeoutException) {
             Logger.warn("${item.title}: Connection timeout")
@@ -138,7 +142,8 @@ class RuleDatabaseItemUpdate(
         try {
             singleWriterMultipleReaderFile.openRead().close()
             connection.ifModifiedSince = file.lastModified()
-        } catch (_: IOException) {
+        } catch (e: IOException) {
+            Logger.debug { "[Blocklist] ${item.title}: no local copy yet, full download (${e.message})" }
         }
 
         connection.connect()

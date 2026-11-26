@@ -80,6 +80,10 @@ class RuleDatabaseUpdateWorker @AssistedInject constructor(
 
         val updateType = if (isAutoUpdate) "auto-update" else "manual update"
         Logger.info("DNS blocklist $updateType started: ${hostsToProcess.size} lists to process")
+        Logger.debug {
+            "[Blocklist] Worker id=$id attempt=$runAttemptCount targets=${targetLists?.size ?: "all"} " +
+                "lists=${hostsToProcess.joinToString { "${it.title}(${it.state})" }}"
+        }
 
         // Set initial progress
         setProgress(workDataOf("progress" to 0, "stage" to "downloading"))
@@ -94,8 +98,11 @@ class RuleDatabaseUpdateWorker @AssistedInject constructor(
                 val job = async { update.run() }
                 job.start()
                 jobs.add(job)
+            } else {
+                Logger.debug { "[Blocklist] Not downloading ${it.title}: state=${it.state}" }
             }
         }
+        Logger.debug { "[Blocklist] Downloading $totalJobs of ${hostsToProcess.size} lists" }
 
         releaseGarbagePermissions()
 
@@ -118,9 +125,11 @@ class RuleDatabaseUpdateWorker @AssistedInject constructor(
 
         // Update domains once after all downloads complete with progress callback
         Logger.info("Reloading domain rules from downloaded files")
+        val reloadStart = System.currentTimeMillis()
         firewallManager.updateDomains { progress ->
             setProgress(workDataOf("progress" to progress, "stage" to "parsing"))
         }
+        Logger.debug { "[Blocklist] Domain rules reloaded in ${System.currentTimeMillis() - reloadStart} ms" }
 
         val duration = System.currentTimeMillis() - start
         val successCount = done.size
@@ -198,6 +207,7 @@ class RuleDatabaseUpdateWorker @AssistedInject constructor(
 
     @Synchronized
     fun addDone(item: Host) {
+        Logger.debug { "[Blocklist] Done ${item.title}" }
         // Don't update domains here - wait until all downloads complete
         pending.remove(item.title)
         done.add(item.title)
@@ -206,6 +216,7 @@ class RuleDatabaseUpdateWorker @AssistedInject constructor(
     }
     @Synchronized
     fun addBegin(item: Host) {
+        Logger.debug { "[Blocklist] Begin ${item.title}" }
         pending.add(item.title)
         updateProgressNotification()
     }

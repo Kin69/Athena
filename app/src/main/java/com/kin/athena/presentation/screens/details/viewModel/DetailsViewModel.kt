@@ -101,6 +101,14 @@ class DetailsViewModel @Inject constructor(
     fun updatePackage(packageEntity: Application) {
         viewModelScope.launch {
             Logger.info("DetailsViewModel: Updating package ${packageEntity.packageID}, wifi=${packageEntity.internetAccess}, cellular=${packageEntity.cellularAccess}, bypassVpn=${packageEntity.bypassVpn}")
+            Logger.debug {
+                val before = (uiState.value as? DetailsUiState.Success)?.application
+                "[UI] App rule change (details) pkg=${packageEntity.packageID} uid=${packageEntity.uid} " +
+                    "wifi=${before?.internetAccess}->${packageEntity.internetAccess} " +
+                    "cell=${before?.cellularAccess}->${packageEntity.cellularAccess} " +
+                    "bypassVpn=${before?.bypassVpn}->${packageEntity.bypassVpn} " +
+                    "firewall=${firewallManager.rulesLoaded.value.name()}"
+            }
             applicationUseCases.updateApplication.execute(packageEntity)
             Logger.info("DetailsViewModel: Package updated in database")
             // The observeApplication flow will automatically update the UI

@@ -246,6 +246,7 @@ class HomeViewModel @Inject constructor(
     }
 
     fun updateFirewallStatus(value: FirewallStatus, serviceType: FirewallMode) {
+        Logger.debug { "[UI] Firewall ${value.name()} requested mode=$serviceType current=${firewallManager.rulesLoaded.value.name()} by=${Logger.caller()}" }
         firewallManager.setFirewallMode(serviceType)
         value?.let {
             if (it.name() == FirewallStatus.ONLINE.name()) firewallManager.startFirewall() else if (it.name() == FirewallStatus.OFFLINE.name()) firewallManager.stopFirewall()
@@ -303,6 +304,7 @@ class HomeViewModel @Inject constructor(
                     }
                 }
             } catch (e: Exception) {
+                Logger.debug(e) { "[UI] Loading applications failed" }
                 _applicationState.value = ApplicationListState.Error(
                     e.message ?: "Unknown error occurred"
                 )
@@ -318,6 +320,15 @@ class HomeViewModel @Inject constructor(
     fun updatePackage(packageEntity: Application, updateUI: Boolean = true) {
         viewModelScope.launch {
             Logger.info("HomeViewModel: updatePackage called for ${packageEntity.packageID}, wifi=${packageEntity.internetAccess}, cellular=${packageEntity.cellularAccess}")
+            Logger.debug {
+                val before = (_applicationState.value as? ApplicationListState.Success)
+                    ?.applications?.find { it.packageID == packageEntity.packageID }
+                "[UI] App rule change pkg=${packageEntity.packageID} uid=${packageEntity.uid} " +
+                    "wifi=${before?.internetAccess}->${packageEntity.internetAccess} " +
+                    "cell=${before?.cellularAccess}->${packageEntity.cellularAccess} " +
+                    "bypassVpn=${before?.bypassVpn}->${packageEntity.bypassVpn} " +
+                    "firewall=${firewallManager.rulesLoaded.value.name()}"
+            }
 
             // Update UI state IMMEDIATELY before database update for instant feedback
             if (updateUI) {
@@ -341,6 +352,8 @@ class HomeViewModel @Inject constructor(
                 withContext(Dispatchers.IO) {
                     firewallManager.updateFirewallRules(packageEntity)
                 }
+            } else {
+                Logger.debug { "[UI] Firewall not online, rules for ${packageEntity.packageID} apply on next start" }
             }
         }
     }
@@ -376,6 +389,7 @@ class HomeViewModel @Inject constructor(
     }
 
     fun addPackageByName(name: String, settingsViewModel: SettingsViewModel) {
+        Logger.debug { "[UI] Package added pkg=$name, adding to the app list" }
         viewModelScope.launch {
             try {
                 val info = context.packageManager.getApplicationInfo(name, 0)
@@ -385,6 +399,7 @@ class HomeViewModel @Inject constructor(
                 loadPackages(settingsViewModel)
             } catch (e: NameNotFoundException) {
                Logger.error("Package $name not found.")
+               Logger.debug(e) { "[UI] Installed package $name is not visible to the package manager" }
             }
         }
     }
@@ -512,6 +527,7 @@ class HomeViewModel @Inject constructor(
 
         override fun onAppUninstalled(packageName: String?) {
             packageName?.let {
+                Logger.debug { "[UI] Package removed pkg=$it, deleting from the app list" }
                 viewModelScope.launch {
                     try {
                         val application = applicationUseCases.getApplication.execute(it)
@@ -532,6 +548,7 @@ class HomeViewModel @Inject constructor(
     }
 
     fun deleteApplication(application: Application) {
+        Logger.debug { "[UI] Delete application pkg=${application.packageID}" }
         viewModelScope.launch {
             applicationUseCases.deleteApplication.execute(application)
         }
@@ -547,6 +564,7 @@ class HomeViewModel @Inject constructor(
 
                 lines?.let {
                     if (lines !in 0..2) {
+                        Logger.debug { "[UI] Leftover root rules found, EasyApps chain lines=$lines" }
                         setRootUncleaned(true)
                     }
                 }
@@ -559,6 +577,7 @@ class HomeViewModel @Inject constructor(
 
                 lines?.let {
                     if (lines !in 0..2) {
+                        Logger.debug { "[UI] Leftover root rules found, EasyApps chain lines=$lines" }
                         setRootUncleaned(true)
                     }
                 }
@@ -569,6 +588,7 @@ class HomeViewModel @Inject constructor(
     }
 
     fun cleanRoot() {
+        Logger.debug { "[UI] Flushing leftover iptables rules (root clean-up)" }
         viewModelScope.launch {
             val shell = Shell("su")
 

@@ -44,6 +44,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.navigation.NavController
 import com.kin.athena.R
+import com.kin.athena.core.logging.Logger
 import com.kin.athena.core.utils.extensions.isFingerprintSupported
 import com.kin.athena.core.utils.extensions.safeNavigate
 import com.kin.athena.presentation.navigation.routes.HomeRoutes
@@ -115,6 +116,7 @@ fun PrivacyScreen(
                         }
                     }
                 } catch (e: Exception) {
+                    Logger.debug(e) { "[Backup] Export to the chosen file failed" }
                     withContext(Dispatchers.Main) {
                         Toast.makeText(context, context.getString(R.string.backup_export_failed, e.message), Toast.LENGTH_LONG).show()
                     }
@@ -151,6 +153,7 @@ fun PrivacyScreen(
                         }
                     }
                 } catch (e: Exception) {
+                    Logger.debug(e) { "[Backup] Import from the chosen file failed" }
                     withContext(Dispatchers.Main) {
                         Toast.makeText(context, context.getString(R.string.backup_import_failed, e.message), Toast.LENGTH_LONG).show()
                     }

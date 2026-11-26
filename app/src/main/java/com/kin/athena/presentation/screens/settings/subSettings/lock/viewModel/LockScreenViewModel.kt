@@ -28,6 +28,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.kin.athena.core.logging.Logger
 import com.kin.athena.presentation.navigation.routes.SettingRoutes
 import com.kin.athena.presentation.screens.settings.viewModel.SettingsViewModel
 import kotlinx.coroutines.delay
@@ -88,6 +89,8 @@ class LockScreenViewModel : ViewModel() {
 
     private fun checkPinCode(settingsViewModel: SettingsViewModel): Boolean {
         if (settingsViewModel.settings.value.passcode == null) {
+            // Never log the PIN itself
+            Logger.debug { "[UI] Lock PIN set, pattern and fingerprint cleared" }
             settingsViewModel.update(
                 settingsViewModel.settings.value.copy(
                     passcode = _pinCode.value.joinToString(""),
@@ -102,6 +105,7 @@ class LockScreenViewModel : ViewModel() {
             if (_pinCode.value.joinToString("") == settingsViewModel.settings.value.passcode) {
                 return true
             } else {
+                Logger.debug { "[UI] Lock PIN incorrect" }
                 _isPinIncorrect.value = true
                 _animateError.value = true
                 viewModelScope.launch {

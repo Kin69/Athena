@@ -53,6 +53,10 @@ class BackupManager @Inject constructor(
         includeBlocklists: Boolean = true,
         includeApplications: Boolean = true
     ): Result<Unit> {
+        Logger.debug {
+            "[Backup] Export started settings=$includeSettings domains=$includeDomains " +
+                "blocklists=$includeBlocklists apps=$includeApplications"
+        }
         return try {
             // Collect settings
             val settingsBackup = if (includeSettings) {
@@ -156,7 +160,10 @@ class BackupManager @Inject constructor(
                             )
                         }
                     },
-                    ifFailure = { emptyList() }
+                    ifFailure = { error ->
+                        Logger.debug { "[Backup] Cannot load application rules for export: ${error.message}" }
+                        emptyList()
+                    }
                 )
             } else {
                 emptyList()
@@ -176,6 +183,10 @@ class BackupManager @Inject constructor(
             outputStream.flush()
 
             Logger.info("Backup exported successfully")
+            Logger.debug {
+                "[Backup] Exported domains=${customDomains.size} blocklists=${customBlocklists.size} " +
+                    "apps=${applications.size} bytes=${jsonString.length}"
+            }
             Result.success(Unit)
         } catch (e: Exception) {
             Logger.error("Failed to export backup", e)
@@ -194,6 +205,12 @@ class BackupManager @Inject constructor(
         return try {
             val jsonString = inputStream.readBytes().decodeToString()
             val backupData = json.decodeFromString<BackupData>(jsonString)
+            Logger.debug {
+                "[Backup] Import started settings=$restoreSettings domains=$restoreDomains " +
+                    "blocklists=$restoreBlocklists apps=$restoreApplications; file has " +
+                    "domains=${backupData.customDomains.size} blocklists=${backupData.customBlocklists.size} " +
+                    "apps=${backupData.applications.size}"
+            }
 
             // Restore settings
             if (restoreSettings) {
@@ -264,6 +281,10 @@ class BackupManager @Inject constructor(
                 applicationUseCases.getApplications.execute().fold(
                     ifSuccess = { installedApps ->
                         // Only restore rules for apps that are currently installed
+                        Logger.debug {
+                            val installed = backupData.applications.count { b -> installedApps.any { it.packageID == b.packageID } }
+                            "[Backup] Restoring rules of $installed apps, ${backupData.applications.size - installed} not installed"
+                        }
                         backupData.applications.forEach { appBackup ->
                             installedApps.find { it.packageID == appBackup.packageID }?.let { app ->
                                 val updatedApp = app.copy(

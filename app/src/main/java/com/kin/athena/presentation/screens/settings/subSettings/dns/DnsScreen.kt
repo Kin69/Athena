@@ -130,6 +130,7 @@ fun DnsScreen(
 
     fun updateLists(onComplete: ((Boolean) -> Unit)? = null) {
         val workRequest = OneTimeWorkRequestBuilder<RuleDatabaseUpdateWorker>().build()
+        Logger.debug { "[Blocklist] Update of all lists requested work=${workRequest.id}" }
         WorkManager.getInstance(context).enqueue(workRequest)
         
         // Monitor work completion
@@ -150,6 +151,7 @@ fun DnsScreen(
             .setInputData(inputData)
             .build()
             
+        Logger.debug { "[Blocklist] Update of $targetList requested work=${workRequest.id}" }
         WorkManager.getInstance(context).enqueue(workRequest)
         
         onComplete?.let { callback ->
@@ -280,6 +282,7 @@ fun DnsScreen(
                                 .setInputData(inputData)
                                 .build()
 
+                            Logger.debug { "[Blocklist] List $listKey enabled, downloading ${lists.size} URLs work=${workRequest.id}" }
                             WorkManager.getInstance(context).enqueue(workRequest)
 
                             WorkManager.getInstance(context)

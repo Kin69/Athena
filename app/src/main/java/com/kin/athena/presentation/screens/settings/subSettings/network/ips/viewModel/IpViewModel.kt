@@ -98,6 +98,7 @@ class IpViewModel @Inject constructor(
     }
 
     fun addIP(value: TextFieldValue) {
+        Logger.debug { "[UI] IP filter add ip=${value.text}" }
         viewModelScope.launch {
             networkFilterUseCases.addIp.execute(Ip(value.text))
             loadBlockedIps()
@@ -108,6 +109,7 @@ class IpViewModel @Inject constructor(
     }
 
     fun deleteIP(ip: String) {
+        Logger.debug { "[UI] IP filter remove ip=$ip" }
         viewModelScope.launch {
             networkFilterUseCases.deleteIp.execute(ip)
             loadBlockedIps()

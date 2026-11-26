@@ -69,10 +69,11 @@ data class Configuration(var hosts: Hosts = Hosts(), ) {
                 data = location,
                 state = state,
             ),
-        )
+        ).also { Logger.debug { "[Blocklist] Config add title=$title url=$location state=$state" } }
 
     fun removeURL(oldURL: String) =
         hosts.items.removeAll { it.data == oldURL }
+            .also { removed -> Logger.debug { "[Blocklist] Config remove url=$oldURL removed=$removed" } }
 
     fun disableURL(oldURL: String) {
         Logger.error("disableURL: Disabling $oldURL")

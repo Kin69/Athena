@@ -36,6 +36,7 @@ class BehaviorViewModel @Inject constructor(
     @ApplicationContext private val context: Context
 ) : ViewModel() {
     fun updateLogs(enabled: Boolean) {
+        Logger.debug { "[UI] Packet logs enabled=$enabled" }
         viewModelScope.launch {
             firewallManager.updateLogs(enabled)
         }
@@ -43,9 +44,14 @@ class BehaviorViewModel @Inject constructor(
 
 
     fun updateApp(wifi: Boolean, cellular: Boolean, updateSystemApps: Boolean) {
+        Logger.debug { "[UI] Bulk app rule change wifi=$wifi cell=$cellular includeSystemApps=$updateSystemApps" }
         viewModelScope.launch {
             applicationUseCases.getApplications.execute().fold(
                 ifSuccess = { applications ->
+                    Logger.debug {
+                        val count = if (updateSystemApps) applications.size else applications.count { !it.systemApp }
+                        "[UI] Bulk app rule change applies to $count of ${applications.size} apps"
+                    }
                     applications.forEach { application ->
                         if (updateSystemApps) {
                             applicationUseCases.updateApplication.execute(application.copy(internetAccess = wifi, cellularAccess = cellular))

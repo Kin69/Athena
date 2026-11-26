@@ -22,6 +22,7 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.kin.athena.core.logging.Logger
 import com.kin.athena.data.cache.DomainCacheService
 import com.kin.athena.presentation.screens.settings.subSettings.dns.components.DownloadState
 import com.kin.athena.presentation.screens.settings.subSettings.dns.hosts.RuleDatabase
@@ -79,28 +80,34 @@ class BlockListViewModel @Inject constructor(
     }
     
     fun refreshDomains() {
+        Logger.debug { "[UI] Domain cache refresh requested" }
         domainCacheService.forceRefresh()
     }
     
     fun invalidateDomainsCache() {
+        Logger.debug { "[UI] Domain cache invalidated" }
         domainCacheService.invalidateCache()
     }
     
     fun startDownload(ruleName: String) {
+        Logger.debug { "[Blocklist] Download started rule=$ruleName" }
         _currentDownloadingRule.value = ruleName
         _downloadState.value = DownloadState.Downloading
         _showDownloadDialog.value = true
     }
     
     fun downloadSuccess() {
+        Logger.debug { "[Blocklist] Download finished rule=${_currentDownloadingRule.value}" }
         _downloadState.value = DownloadState.Success
     }
     
     fun downloadNetworkError() {
+        Logger.debug { "[Blocklist] Download network error rule=${_currentDownloadingRule.value}" }
         _downloadState.value = DownloadState.NetworkError
     }
     
     fun downloadError() {
+        Logger.debug { "[Blocklist] Download failed rule=${_currentDownloadingRule.value}" }
         _downloadState.value = DownloadState.Error
     }
 

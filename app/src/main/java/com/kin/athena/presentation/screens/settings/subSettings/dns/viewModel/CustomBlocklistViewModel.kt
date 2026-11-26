@@ -20,6 +20,7 @@ package com.kin.athena.presentation.screens.settings.subSettings.dns.viewModel
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.kin.athena.core.logging.Logger
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -166,6 +167,7 @@ class CustomBlocklistViewModel @Inject constructor(
                 }
                 _validationState.value = result
             } catch (e: Exception) {
+                Logger.debug(e) { "[Blocklist] Validation of $url failed" }
                 _validationState.value = BlocklistValidationState(
                     isValid = false,
                     errorMessage = "Validation failed: ${e.message}"
@@ -175,6 +177,7 @@ class CustomBlocklistViewModel @Inject constructor(
     }
 
     private suspend fun validateBlocklistUrl(url: String): BlocklistValidationState {
+        Logger.debug { "[Blocklist] Validating url=$url" }
         return try {
             val request = Request.Builder()
                 .url(url)
@@ -203,6 +206,7 @@ class CustomBlocklistViewModel @Inject constructor(
                 val contentResponse = httpClient.newCall(getRequest).execute()
                 val sampleContent = contentResponse.body?.string() ?: ""
                 val entryCount = estimateEntryCount(sampleContent, contentLength)
+                Logger.debug { "[Blocklist] Valid url=$url size=$contentLength estimatedEntries=$entryCount type=$contentType" }
 
                 BlocklistValidationState(
                     isValid = true,
@@ -212,17 +216,20 @@ class CustomBlocklistViewModel @Inject constructor(
                     contentType = contentType
                 )
             } else {
+                Logger.debug { "[Blocklist] Invalid url=$url http=${response.code}" }
                 BlocklistValidationState(
                     isValid = false,
                     errorMessage = "HTTP ${response.code}: ${response.message}"
                 )
             }
         } catch (e: IOException) {
+            Logger.debug(e) { "[Blocklist] Validation network error url=$url" }
             BlocklistValidationState(
                 isValid = false,
                 errorMessage = "Network error: ${e.message}"
             )
         } catch (e: Exception) {
+            Logger.debug(e) { "[Blocklist] Validation error url=$url" }
             BlocklistValidationState(
                 isValid = false,
                 errorMessage = "Validation error: ${e.message}"
@@ -328,6 +335,7 @@ class CustomBlocklistViewModel @Inject constructor(
                     parseBlocklistUrls(text)
                 }
                 _importResults.value = results
+                Logger.debug { "[Blocklist] Import from text found ${results.size} URLs" }
             } finally {
                 _isImporting.value = false
             }
@@ -389,6 +397,7 @@ class CustomBlocklistViewModel @Inject constructor(
                     validateBlocklistUrl(url)
                 } catch (e: Exception) {
                     // Log error but continue with other URLs
+                    Logger.debug(e) { "[Blocklist] Validation of $url failed" }
                 }
             }
         }
@@ -402,6 +411,7 @@ class CustomBlocklistViewModel @Inject constructor(
                 }
                 callback(result)
             } catch (e: Exception) {
+                Logger.debug(e) { "[Blocklist] Preview of $url failed" }
                 callback(
                     BlocklistValidationState(
                         isValid = false,
@@ -413,12 +423,14 @@ class CustomBlocklistViewModel @Inject constructor(
     }
 
     fun startDeletion(url: String) {
+        Logger.debug { "[Blocklist] Deleting url=$url" }
         val current = _deletingItems.value.toMutableSet()
         current.add(url)
         _deletingItems.value = current
     }
 
     fun finishDeletion(url: String) {
+        Logger.debug { "[Blocklist] Deleted url=$url" }
         val current = _deletingItems.value.toMutableSet()
         current.remove(url)
         _deletingItems.value = current

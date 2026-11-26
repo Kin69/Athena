@@ -85,9 +85,12 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun verifyLicense(key: String, onResult: (Boolean, String) -> Unit = { _, _ -> }) {
+        // Never log the key itself
+        Logger.debug { "[Settings] License verification requested" }
         viewModelScope.launch {
             verifyLicenseUseCase.invoke(key).fold(
                 ifSuccess = { licenseResponse ->
+                    Logger.debug { "[Settings] License verification result valid=${licenseResponse.valid}" }
                     if (licenseResponse.valid == true) {
                         update(settings.value.copy(premiumUnlocked = true))
                         Toast.makeText(context, context.getString(R.string.premium_activation_success), Toast.LENGTH_LONG).show()
@@ -99,6 +102,7 @@ class SettingsViewModel @Inject constructor(
                     }
                 },
                 ifFailure = { error ->
+                    Logger.debug { "[Settings] License verification failed: ${error.message}" }
                     val errorMessage = "❌ Failed to verify license: ${error.message}"
                     Toast.makeText(context, errorMessage, Toast.LENGTH_LONG).show()
                     onResult(false, errorMessage)
@@ -204,6 +208,7 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun updateDefaultRoute(route: String) {
+        Logger.debug { "[Settings] defaultRoute=$route" }
         _settings.value = _settings.value.copy(defaultRoute = route)
         viewModelScope.launch {
             preferenceUseCases.saveSettings.execute(_settings.value)
@@ -212,6 +217,7 @@ class SettingsViewModel @Inject constructor(
 
     fun update(newSettings: Settings, onSuccess: (() -> Unit)? = null) {
         val oldSettings = _settings.value
+        Logger.debug { "[Settings] Changed ${settingsDiff(oldSettings, newSettings)}" }
         _settings.value = newSettings.copy()
 
         // Check if app filtering settings changed and trigger reload IMMEDIATELY
@@ -227,6 +233,7 @@ class SettingsViewModel @Inject constructor(
                     ifSuccess = {
                         // Check if blockPort80 setting changed
                         if (oldSettings.blockPort80 != newSettings.blockPort80) {
+                            Logger.debug { "[Settings] blockPort80 changed, updating the HTTP rule" }
                             firewallManager.updateHttpSettings()
                         }
 
@@ -269,6 +276,21 @@ class SettingsViewModel @Inject constructor(
             e.printStackTrace()
             null
         }
+    }
+
+    // Debug builds only: the settings that differ, as name=old->new. Lock secrets only say that they changed.
+    private fun settingsDiff(old: Settings, new: Settings): String {
+        val changes = Settings::class.java.declaredFields.mapNotNull { field ->
+            field.isAccessible = true
+            val before = field.get(old)
+            val after = field.get(new)
+            when {
+                before == after -> null
+                field.name in SECRET_SETTINGS -> "${field.name}=<changed, set=${after != null}>"
+                else -> "${field.name}=$before->$after"
+            }
+        }
+        return if (changes.isEmpty()) "nothing" else changes.joinToString(" ")
     }
 
     fun getSupportedLanguages(context: Context): Map<String, String> {
@@ -315,5 +337,9 @@ class SettingsViewModel @Inject constructor(
 
     fun isProductOwned(productId: String): Boolean {
         return billingProvider.getBillingInterface()?.isProductOwned(productId) ?: false
+    }
+
+    private companion object {
+        val SECRET_SETTINGS = setOf("passcode", "pattern")
     }
 }

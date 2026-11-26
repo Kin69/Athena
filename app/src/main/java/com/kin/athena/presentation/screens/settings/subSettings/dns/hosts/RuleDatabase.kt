@@ -124,6 +124,7 @@ class RuleDatabase {
 
     @Throws(InterruptedException::class)
     suspend fun initialize(rootMode: Boolean = false, progressCallback: (suspend (Int) -> Unit)? = null): List<String>? {
+        val startedAt = System.currentTimeMillis()
 
         val sortedHostItems = config.hosts.items
             .mapNotNull {
@@ -140,6 +141,10 @@ class RuleDatabase {
         whitelistedHosts.clear()
 
         val totalItems = sortedHostItems.size
+        Logger.debug {
+            "[Blocklist] Loading domain rules rootMode=$rootMode lists=$totalItems of ${config.hosts.items.size} " +
+                "exceptions=${config.hosts.exceptions.size}"
+        }
         for ((index, item) in sortedHostItems.withIndex()) {
             if (Thread.interrupted()) {
                 throw InterruptedException("Interrupted")
@@ -154,6 +159,7 @@ class RuleDatabase {
         }
 
         if (rootMode) {
+            Logger.debug { "[Blocklist] Root mode: ${allHosts.size} hosts loaded in ${System.currentTimeMillis() - startedAt} ms" }
             return allHosts
         }
 
@@ -167,6 +173,7 @@ class RuleDatabase {
         blockedHosts.value = atomic(newHosts)
         val totalRules = newHosts.size + wildcardRules.size + regexRules.size
         Logger.info("Domain rules loaded: $totalRules total (${newHosts.size} domains, ${wildcardRules.size} wildcards, ${regexRules.size} regex, ${whitelistedHosts.size} whitelisted)")
+        Logger.debug { "[Blocklist] Domain rules loaded in ${System.currentTimeMillis() - startedAt} ms" }
         Runtime.getRuntime().gc()
         return null
     }

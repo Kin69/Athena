@@ -57,6 +57,7 @@ class PacketViewModel @Inject constructor(
 
 
     fun addIp(ip: Ip) {
+        Logger.debug { "[UI] IP filter add ip=${ip.ip} (from packet log)" }
         viewModelScope.launch {
             networkFilterUseCases.addIp.execute(ip)
             firewallManager.updateFirewallRules(null)
@@ -64,6 +65,7 @@ class PacketViewModel @Inject constructor(
     }
 
     fun deleteIp(ip: String) {
+        Logger.debug { "[UI] IP filter remove ip=$ip (from packet log)" }
         viewModelScope.launch {
             networkFilterUseCases.deleteIp.execute(ip)
             firewallManager.updateFirewallRules(null)
