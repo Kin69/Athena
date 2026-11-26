@@ -546,6 +546,8 @@ jboolean handle_tcp(const struct arguments *args, const uint8_t *pkt, size_t len
 
             s->socket = open_tcp_socket(args, &s->tcp, redirect);
             if (s->socket < 0) {
+                // The SYN's queued data too, not only the session
+                clear_tcp_data(&s->tcp);
                 ng_free(s, __FILE__, __LINE__);
                 return 0;
             }
@@ -671,6 +673,15 @@ jboolean handle_tcp(const struct arguments *args, const uint8_t *pkt, size_t len
     return 1;
 }
 
+// Closes an upstream socket that could not be set up and returns -1, keeping the errno of the failure
+static int close_failed_socket(int sock, const char *what) {
+    int err = errno;
+    log_android(ANDROID_LOG_DEBUG, "TCP upstream %s error %d: %s, closing socket %d", what, err, strerror(err), sock);
+    close(sock);
+    errno = err;
+    return -1;
+}
+
 int open_tcp_socket(const struct arguments *args, const struct tcp_session *cur, const struct allowed *redirect) {
     int sock;
     int version;
@@ -685,13 +696,15 @@ int open_tcp_socket(const struct arguments *args, const struct tcp_session *cur,
     if ((sock = socket(version == 4 ? PF_INET : PF_INET6, SOCK_STREAM, 0)) < 0)
         return -1;
 
+    // Every failure below closes the socket: the caller only frees the session. A connect() that fails at once
+    // (ENETUNREACH while there is no network, during a Wi-Fi switch) leaked one fd per SYN before.
     int on = 1;
     if (setsockopt(sock, SOL_TCP, TCP_NODELAY, &on, sizeof(on)) < 0)
-        return -1;
+        return close_failed_socket(sock, "setsockopt TCP_NODELAY");
 
     int flags = fcntl(sock, F_GETFL, 0);
     if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0)
-        return -1;
+        return close_failed_socket(sock, "fcntl O_NONBLOCK");
 
     struct sockaddr_in addr4;
     struct sockaddr_in6 addr6;
@@ -731,7 +744,7 @@ int open_tcp_socket(const struct arguments *args, const struct tcp_session *cur,
 
     int err = connect(sock, (version == 4 ? (const struct sockaddr *) &addr4 : (const struct sockaddr *) &addr6), (socklen_t) (version == 4 ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6)));
     if (err < 0 && errno != EINPROGRESS)
-        return -1;
+        return close_failed_socket(sock, "connect");
 
     return sock;
 }
