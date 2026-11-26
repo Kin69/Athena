@@ -159,7 +159,7 @@ class SettingsViewModel @Inject constructor(
             return
         }
 
-        println("DEBUG: SettingsViewModel(${this.hashCode()}) - Setting dialog state to true")
+        Logger.debug { "[Settings] SettingsViewModel(${this.hashCode()}) - Setting dialog state to true" }
         _currentFeatureChoice.value = FeatureChoice(
             featureName = featureName,
             featureDescription = featureDescription,
@@ -167,7 +167,7 @@ class SettingsViewModel @Inject constructor(
             onSuccess = onSuccess
         )
         _showFeatureChoiceDialog.value = true
-        println("DEBUG: SettingsViewModel(${this.hashCode()}) - Dialog state is now: ${_showFeatureChoiceDialog.value}")
+        Logger.debug { "[Settings] SettingsViewModel(${this.hashCode()}) - Dialog state is now: ${_showFeatureChoiceDialog.value}" }
     }
 
     fun dismissFeatureChoiceDialog() {
@@ -270,10 +270,10 @@ class SettingsViewModel @Inject constructor(
             }
         null
         } catch (e: PackageManager.NameNotFoundException) {
-            e.printStackTrace()
+            Logger.error("Failed to read the app signature", e)
             null
         } catch (e: NoSuchAlgorithmException) {
-            e.printStackTrace()
+            Logger.error("Failed to read the app signature", e)
             null
         }
     }
@@ -319,9 +319,9 @@ class SettingsViewModel @Inject constructor(
                 xpp.next()
             }
         } catch (e: XmlPullParserException) {
-            e.printStackTrace()
+            Logger.error("Failed to read locales_config", e)
         } catch (e: IOException) {
-            e.printStackTrace()
+            Logger.error("Failed to read locales_config", e)
         }
 
         return LocaleListCompat.forLanguageTags(tagsList.joinToString(","))

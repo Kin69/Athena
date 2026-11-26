@@ -19,7 +19,6 @@ package com.kin.athena.service.vpn.service
 
 import android.os.Build
 import android.os.SystemClock
-import android.util.Log
 import com.kin.athena.core.logging.Logger
 import com.kin.athena.service.firewall.handler.RuleHandler
 import com.kin.athena.service.firewall.handler.filterPacket
@@ -48,6 +47,7 @@ class TunnelManager(
     private var contextPtr: Long = 0
     private val lock = Any()
     private var isReleased = false
+    private val packetLogThrottle = Logger.Throttle()
 
 
 
@@ -145,10 +145,10 @@ class TunnelManager(
             
             if (ipVersion == 6) {
                 // IPv6 packets - currently not supported for TCP filtering
-                Log.d("PacketFilter", "[$direction] IPv6 TCP packet detected, allowing (not implemented)")
+                if (packetLogThrottle.shouldLog("ipv6-tcp-$direction")) Logger.debug { "[Pkt] $direction IPv6 TCP packet allowed (filtering not implemented)" }
                 return true
             } else if (ipVersion != 4) {
-                Log.w("PacketFilter", "[$direction] Unknown IP version $ipVersion, blocking")
+                Logger.debug { "[Pkt] $direction unknown IP version $ipVersion, blocking" }
                 return false
             }
             
@@ -165,19 +165,20 @@ class TunnelManager(
                 
                 allowed
             } ?: run {
-                Log.d("PacketFilter", "[$direction] TCP: No RuleHandler, allowing packet")
+                Logger.debug { "[Pkt] $direction TCP allowed: no RuleHandler" }
                 true // Allow if no rule handler
             }
         } catch (e: Exception) {
             // For malformed packets (like Data Offset 0), block them for security
             if (e.message?.contains("Malformed TCP packet") == true) {
-                // Log full packet data for debugging
-                val packetHex = data.take(minOf(length, 100)).joinToString(" ") { "%02x".format(it) }
-                Log.d("PacketFilter", "[$direction] TCP: Blocking malformed packet: ${e.message}")
-                Log.d("PacketFilter", "[$direction] TCP: Full packet hex (first 100 bytes): $packetHex")
+                // Headers only (first 40 bytes), never the payload
+                Logger.debug {
+                    "[Pkt] $direction TCP blocking malformed packet: ${e.message}, headers: " +
+                        data.take(minOf(length, 40)).joinToString(" ") { "%02x".format(it) }
+                }
                 false // Block malformed packets
             } else {
-                Log.e("PacketFilter", "Error filtering TCP packet: ${e.message}")
+                Logger.error("Error filtering TCP packet: ${e.message}")
                 true // Allow packet if other parsing errors occur
             }
         }
@@ -202,7 +203,7 @@ class TunnelManager(
                         ByteBuffer.wrap(udpData).toDNSModel()
 
                     } catch (e: Exception) {
-                        Log.w("PacketFilter", "Failed to parse DNS model: ${e.message}")
+                        Logger.debug { "[Pkt] $direction failed to parse DNS query: ${e.message}" }
                         null
                     }
                 } else null
@@ -218,23 +219,23 @@ class TunnelManager(
                         val udpPacketData = ByteBuffer.wrap(data, udpStartPosition, length - udpStartPosition)
                         udpPacketData.order(ByteOrder.BIG_ENDIAN)
                         
-                        Log.d("PacketFilter", "[$direction] DNS: Creating SOAR response for blocked domain, UDP data size: ${udpPacketData.remaining()}")
+                        Logger.debug { "[Pkt] $direction DNS creating SOAR response for a blocked domain, UDP data size: ${udpPacketData.remaining()}" }
                         val soarResponsePayload = soarResponse(udpPacketData, ipHeader)
-                        Log.d("PacketFilter", "[$direction] DNS: SOAR response payload created, size: ${soarResponsePayload.size}")
+                        Logger.debug { "[Pkt] $direction DNS SOAR response payload size: ${soarResponsePayload.size}" }
                         
                         // Create complete response packet using Kotlin packet creation system
                         val completeResponsePacket = handleDnsResponse(udpHeader, ipHeader, soarResponsePayload)
-                        Log.d("PacketFilter", "[$direction] DNS: Complete response packet created, size: ${completeResponsePacket.size}")
+                        Logger.debug { "[Pkt] $direction DNS response packet size: ${completeResponsePacket.size}" }
                         
                         // Send complete packet through VPN interface
                         if (contextPtr != 0L) {
                             jni_send_complete_packet(contextPtr, completeResponsePacket)
                         }
                         
-                        Log.d("PacketFilter", "[$direction] DNS: Sent SOAR response for blocked domain")
+                        Logger.debug { "[Pkt] $direction DNS sent SOAR response for a blocked domain" }
                         false // Block original packet
                     } catch (e: Exception) {
-                        Log.e("PacketFilter", "Error creating/sending SOAR response: ${e.message}", e)
+                        Logger.error("Error creating/sending SOAR response: ${e.message}", e)
                         false // Block packet on error
                     }
                 } else {
@@ -263,11 +264,11 @@ class TunnelManager(
 
                 allowed
             } ?: run {
-                Log.d("PacketFilter", "[$direction] ICMP: No RuleHandler, allowing packet")
+                Logger.debug { "[Pkt] $direction ICMP allowed: no RuleHandler" }
                 true
             }
         } catch (e: Exception) {
-            Log.e("PacketFilter", "Error filtering ICMP packet: ${e.message}")
+            Logger.error("Error filtering ICMP packet: ${e.message}")
             true
         }
     }

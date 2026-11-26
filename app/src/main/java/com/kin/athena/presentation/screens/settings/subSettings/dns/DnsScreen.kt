@@ -598,7 +598,7 @@ fun DnsScreen(
                 icon = IconType.VectorIcon(Icons.Rounded.Add),
                 actionType = SettingType.CUSTOM,
                 customAction = { onExit ->
-                    println("DEBUG: Custom action composable called")
+                    Logger.debug { "[UI] Custom blocklist action composable called" }
                     val isOwned = settings.isProductOwned("custom_blocklist")
                     if (!settings.settings.value.premiumUnlocked && !isOwned) {
                         showPremiumDialog = true

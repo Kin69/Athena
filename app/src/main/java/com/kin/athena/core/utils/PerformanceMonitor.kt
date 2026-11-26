@@ -17,7 +17,7 @@
 
 package com.kin.athena.core.utils
 
-import android.util.Log
+import com.kin.athena.core.logging.Logger
 
 /**
  * Utility object for monitoring performance of statistics calculations and other operations.
@@ -43,7 +43,7 @@ object PerformanceMonitor {
         val endTime = System.nanoTime()
         val durationMs = (endTime - startTime) / 1_000_000.0
         
-        Log.d(TAG, "$operationName took ${String.format("%.2f", durationMs)}ms")
+        Logger.debug { "[Perf] $operationName took ${String.format("%.2f", durationMs)}ms" }
         
         return result
     }
@@ -62,7 +62,7 @@ object PerformanceMonitor {
         val usedMB = usedMemory / (1024 * 1024)
         val maxMB = maxMemory / (1024 * 1024)
         
-        Log.d(TAG, "$context - Memory usage: ${usedMB}MB / ${maxMB}MB")
+        Logger.debug { "[Perf] $context - Memory usage: ${usedMB}MB / ${maxMB}MB" }
     }
     
     /**
@@ -78,6 +78,6 @@ object PerformanceMonitor {
         val total = hits + misses
         val hitRate = if (total > 0) (hits.toDouble() / total * 100) else 0.0
         
-        Log.d(TAG, "$cacheName cache - Hits: $hits, Misses: $misses, Hit rate: ${String.format("%.1f", hitRate)}%")
+        Logger.debug { "[Perf] $cacheName cache - Hits: $hits, Misses: $misses, Hit rate: ${String.format("%.1f", hitRate)}%" }
     }
 }

@@ -210,7 +210,7 @@ fun Context.uidToApplication(uid: Int): Application? {
             systemApp = false
         )
     } catch (e: Exception) {
-        e.printStackTrace()
+        Logger.debug(e) { "[Apps] No application for uid=$uid" }
         null
     }
 }

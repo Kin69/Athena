@@ -126,3 +126,9 @@
 -allowaccessmodification
 -repackageclasses ''
 -overloadaggressively
+
+# Release builds drop verbose and debug logcat calls; Logger.debug already skips them, this also covers libraries
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+}

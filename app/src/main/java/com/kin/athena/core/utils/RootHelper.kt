@@ -97,7 +97,7 @@ fun getSystemProperty(propName: String): String? {
         val bufferedReader = process.inputStream.bufferedReader()
         return bufferedReader.readLine()
     } catch (e: Exception) {
-        e.printStackTrace()
+        Logger.error("Failed to read system property $propName", e)
     }
     return null
 }
@@ -118,10 +118,10 @@ suspend fun grantRootAccess(): Boolean {
             val exitCode = process.waitFor()
             exitCode == 0
         } catch (e: IOException) {
-            e.printStackTrace()
+            Logger.error("Failed to request root access", e)
             false
         } catch (e: Exception) {
-            e.printStackTrace()
+            Logger.error("Failed to request root access", e)
             false
         }
     }
@@ -149,6 +149,6 @@ fun runRootCommand(commands: String){
         outputStream.flush()
 
     } catch (e: Exception) {
-        e.printStackTrace()
+        Logger.error("Failed to run root command", e)
     }
 }
