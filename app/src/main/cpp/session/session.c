@@ -46,6 +46,80 @@ void clear(struct context *ctx) {
     ctx->ng_session = NULL;
 }
 
+// Event thread only, requested by jni_clear_sessions: the old network is gone or the rules changed.
+void clear_sessions(const struct arguments *args, long long requested) {
+    if (pthread_mutex_lock(&args->ctx->lock)) {
+        log_android(ANDROID_LOG_ERROR, "Failed to lock mutex for clearing sessions");
+        return;
+    }
+
+    // Tell the apps their connections are gone before freeing them. Without an RST an idle connection
+    // (push, chat) still looks alive to the app and hangs until the app itself sends something, which for
+    // Play services' push connection is its next heartbeat, often 10+ minutes after a network change.
+    // Sessions still in LISTEN are left alone: the app retransmits the SYN and gets a new session.
+    int reset = 0;
+    int tcp = 0;
+    int udp = 0;
+    int icmp = 0;
+    for (struct ng_session *s = args->ctx->ng_session; s != NULL; s = s->next) {
+        if (s->protocol == IPPROTO_TCP) {
+            tcp++;
+            if (s->tcp.state != TCP_LISTEN && s->tcp.state != TCP_CLOSING && s->tcp.state != TCP_CLOSE) {
+                write_rst(args, &s->tcp);
+                reset++;
+            }
+        } else if (s->protocol == IPPROTO_UDP)
+            udp++;
+        else
+            icmp++;
+    }
+
+    clear(args->ctx);
+
+    log_android(ANDROID_LOG_INFO, "Cleared all sessions on the event thread: reset %d TCP connections, freed %d sessions (%d TCP, %d UDP, %d ICMP), requested %lld ms ago",
+                reset, tcp + udp + icmp, tcp, udp, icmp, get_ms() - requested);
+
+    pthread_mutex_unlock(&args->ctx->lock);
+}
+
+// Event thread only, requested by jni_reset_sessions: the uids are blocked on the new network. Their TCP connections
+// get an RST and are closed by the next check_tcp_session; the sessions of all other uids keep running.
+// Connections still being opened (LISTEN) are refused too, otherwise they would connect on the new network.
+void reset_uid_sessions(const struct arguments *args, const jint *uids, int count, long long requested) {
+    if (pthread_mutex_lock(&args->ctx->lock)) {
+        log_android(ANDROID_LOG_ERROR, "Failed to lock mutex for resetting sessions");
+        return;
+    }
+
+    int reset = 0;
+    int kept = 0;
+    char reset_uids[256];
+    int reset_uids_len = 0;
+    *reset_uids = 0;
+    for (struct ng_session *s = args->ctx->ng_session; s != NULL; s = s->next) {
+        if (s->protocol != IPPROTO_TCP || s->tcp.state == TCP_CLOSING || s->tcp.state == TCP_CLOSE)
+            continue;
+
+        int blocked = 0;
+        for (int i = 0; i < count && !blocked; i++)
+            blocked = (uids[i] == s->tcp.uid);
+        if (!blocked) {
+            kept++;
+            continue;
+        }
+
+        write_rst(args, &s->tcp);
+        reset++;
+        if (reset_uids_len < (int) sizeof(reset_uids) - 16)
+            reset_uids_len += snprintf(reset_uids + reset_uids_len, sizeof(reset_uids) - reset_uids_len, " %d", s->tcp.uid);
+    }
+
+    log_android(ANDROID_LOG_INFO, "Reset %d TCP connections of uids blocked on the new network (%d uids asked), kept %d, requested %lld ms ago, reset uids:%s",
+                reset, count, kept, get_ms() - requested, reset > 0 ? reset_uids : " none");
+
+    pthread_mutex_unlock(&args->ctx->lock);
+}
+
 void *handle_events(void *a) {
     struct arguments *args = (struct arguments *) a;
 
@@ -84,6 +158,27 @@ void *handle_events(void *a) {
     while (!args->ctx->stopping) {
         int recheck = 0;
         int timeout = EPOLL_TIMEOUT;
+
+        // Clears and resets requested by other threads run here, before any session pointer is taken: none from
+        // the previous epoll_wait is used anymore, so no session is freed while it is in use.
+        if (__atomic_exchange_n(&args->ctx->clear_pending, 0, __ATOMIC_ACQ_REL))
+            clear_sessions(args, __atomic_load_n(&args->ctx->clear_requested, __ATOMIC_ACQUIRE));
+
+        jint *reset_uids = NULL;
+        int reset_count = 0;
+        long long reset_requested = 0;
+        if (pthread_mutex_lock(&args->ctx->reset_lock) == 0) {
+            reset_uids = args->ctx->reset_uids;
+            reset_count = args->ctx->reset_count;
+            reset_requested = args->ctx->reset_requested;
+            args->ctx->reset_uids = NULL;
+            args->ctx->reset_count = 0;
+            pthread_mutex_unlock(&args->ctx->reset_lock);
+        }
+        if (reset_uids != NULL) {
+            reset_uid_sessions(args, reset_uids, reset_count, reset_requested);
+            ng_free(reset_uids, __FILE__, __LINE__);
+        }
 
         int isessions = 0;
         int usessions = 0;
@@ -183,8 +278,10 @@ void *handle_events(void *a) {
 
             for (int i = 0; i < ready; i++) {
                 if (ev[i].data.ptr == &ev_pipe) {
-                    uint8_t buffer[1];
-                    read(args->ctx->pipefds[0], buffer, 1);
+                    // Wake-up from jni_stop, jni_clear_sessions or jni_reset_sessions: the loop then checks all of them.
+                    // Anything left in the pipe wakes epoll_wait again.
+                    uint8_t buffer[16];
+                    read(args->ctx->pipefds[0], buffer, sizeof(buffer));
                 } else if (ev[i].data.ptr == NULL) {
                     int count = 0;
                     while (count < TUN_YIELD && !error && !args->ctx->stopping && is_readable(args->tun)) {

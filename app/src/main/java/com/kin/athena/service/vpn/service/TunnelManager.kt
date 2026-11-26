@@ -108,9 +108,11 @@ class TunnelManager(
         }
     }
     
+    /**
+     * Asks the packet thread to reset every TCP connection and free all sessions, and returns at once. The packet
+     * thread does it at the top of its event loop, where it uses no session, so the caller never waits for it.
+     */
     fun clearSessions() {
-        // Debug logs only: a long wait for the lock means the clear was queued behind release()
-        val calledAt = SystemClock.uptimeMillis()
         synchronized(lock) {
             try {
                 if (isReleased) {
@@ -119,10 +121,8 @@ class TunnelManager(
                 }
                 val contextPtrSnapshot = contextPtr
                 if (contextPtrSnapshot != 0L) {
-                    val lockedAt = SystemClock.uptimeMillis()
-                    Logger.debug { "[Engine] clearSessions by ${Logger.caller()} on ${Thread.currentThread().name}, waited ${lockedAt - calledAt} ms for the lock" }
+                    Logger.debug { "[Engine] clearSessions by ${Logger.caller()} on ${Thread.currentThread().name}: handed to the packet thread" }
                     jni_clear_sessions(contextPtrSnapshot)
-                    Logger.debug { "[Engine] jni_clear_sessions blocked for ${SystemClock.uptimeMillis() - lockedAt} ms" }
                 } else {
                     Logger.warn("Cannot clear sessions: TunnelManager not properly initialized")
                 }
@@ -134,7 +134,38 @@ class TunnelManager(
         }
     }
 
-    private fun onTcpPacketReceived(data: ByteArray, length: Int, direction: String): Boolean {
+    /**
+     * Asks the packet thread to reset the TCP connections of [uids] (an RST to the app, as for a clear) and keep all
+     * other sessions. Returns at once, like [clearSessions].
+     */
+    fun resetSessions(uids: IntArray) {
+        if (uids.isEmpty()) return
+        synchronized(lock) {
+            try {
+                if (isReleased) {
+                    Logger.warn("Cannot reset sessions: TunnelManager has been released")
+                    return
+                }
+                val contextPtrSnapshot = contextPtr
+                if (contextPtrSnapshot != 0L) {
+                    Logger.debug { "[Engine] resetSessions of ${uids.size} uids by ${Logger.caller()}: handed to the packet thread" }
+                    jni_reset_sessions(contextPtrSnapshot, uids)
+                } else {
+                    Logger.warn("Cannot reset sessions: TunnelManager not properly initialized")
+                }
+            } catch (e: UnsatisfiedLinkError) {
+                Logger.error("Native library unavailable for resetSessions: ${e.message}")
+            } catch (e: Exception) {
+                Logger.error("Error in resetSessions: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * Returns [TCP_DROP] to drop the packet. Otherwise it is allowed, and the value is the uid that owns a new
+     * connection (a SYN), which the engine keeps with the session, or -1 (unknown, or not a SYN).
+     */
+    private fun onTcpPacketReceived(data: ByteArray, length: Int, direction: String): Int {
         return try {
             val buffer = ByteBuffer.wrap(data, 0, length)
             buffer.order(ByteOrder.BIG_ENDIAN)
@@ -146,10 +177,10 @@ class TunnelManager(
             if (ipVersion == 6) {
                 // IPv6 packets - currently not supported for TCP filtering
                 if (packetLogThrottle.shouldLog("ipv6-tcp-$direction")) Logger.debug { "[Pkt] $direction IPv6 TCP packet allowed (filtering not implemented)" }
-                return true
+                return UID_UNKNOWN
             } else if (ipVersion != 4) {
                 Logger.debug { "[Pkt] $direction unknown IP version $ipVersion, blocking" }
-                return false
+                return TCP_DROP
             }
             
             val ipHeader = buffer.toIPv4Header()
@@ -163,10 +194,14 @@ class TunnelManager(
                 
                 val allowed = filterResult.first
                 
-                allowed
+                when {
+                    !allowed -> TCP_DROP
+                    isSynPacket && filterResult.second >= 0 -> filterResult.second
+                    else -> UID_UNKNOWN
+                }
             } ?: run {
                 Logger.debug { "[Pkt] $direction TCP allowed: no RuleHandler" }
-                true // Allow if no rule handler
+                UID_UNKNOWN // Allow if no rule handler
             }
         } catch (e: Exception) {
             // For malformed packets (like Data Offset 0), block them for security
@@ -176,10 +211,10 @@ class TunnelManager(
                     "[Pkt] $direction TCP blocking malformed packet: ${e.message}, headers: " +
                         data.take(minOf(length, 40)).joinToString(" ") { "%02x".format(it) }
                 }
-                false // Block malformed packets
+                TCP_DROP // Block malformed packets
             } else {
                 Logger.error("Error filtering TCP packet: ${e.message}")
-                true // Allow packet if other parsing errors occur
+                UID_UNKNOWN // Allow packet if other parsing errors occur
             }
         }
     }
@@ -307,10 +342,15 @@ class TunnelManager(
     private external fun jni_getprop(name: String): String
     private external fun jni_get_mtu(): Int
     private external fun jni_clear_sessions(context: Long)
+    private external fun jni_reset_sessions(context: Long, uids: IntArray)
     private external fun jni_set_dns_servers(context: Long, dnsV4: String, dnsV6: String)
     private external fun jni_send_complete_packet(context: Long, packetData: ByteArray)
 
     companion object {
+        // Return values of onTcpPacketReceived, TCP_FILTER_DROP in athena.h
+        private const val TCP_DROP = -2
+        private const val UID_UNKNOWN = -1
+
         init {
             System.loadLibrary("athena")
         }

@@ -262,8 +262,13 @@ void handle_ip(const struct arguments *args, const uint8_t *pkt, const size_t le
             handle_udp(args, pkt, length, payload, uid, redirect, epoll_fd);
         }
     } else if (protocol == IPPROTO_TCP) {
-        allow_packet = filter_tcp_packet(args, pkt, length, "TUN_IN");
+        jint verdict = filter_tcp_packet(args, pkt, length, "TUN_IN");
+        allow_packet = (verdict != TCP_FILTER_DROP);
         if (allow_packet) {
+            // The owner of a new connection, so a network change can reset the connections of apps blocked on the
+            // new network (reset_uid_sessions)
+            if (syn && verdict >= 0)
+                uid = verdict;
             handle_tcp(args, pkt, length, payload, uid, allowed, redirect, epoll_fd);
         }
     }

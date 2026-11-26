@@ -53,7 +53,14 @@ JNIEXPORT jlong JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jn
     struct context *ctx = ng_calloc(1, sizeof(struct context), "init");
     ctx->sdk = sdk;
     if (pthread_mutex_init(&ctx->lock, NULL)) log_android(ANDROID_LOG_ERROR, "pthread_mutex_init failed");
+    if (pthread_mutex_init(&ctx->reset_lock, NULL)) log_android(ANDROID_LOG_ERROR, "pthread_mutex_init reset_lock failed");
     if (pipe(ctx->pipefds)) log_android(ANDROID_LOG_ERROR, "Create pipe error %d: %s", errno, strerror(errno));
+    // Wake-ups must never block the caller: a full pipe already holds a pending wake-up, and the event thread drains it
+    for (int i = 0; i < 2; i++) {
+        int flags = fcntl(ctx->pipefds[i], F_GETFL, 0);
+        if (flags < 0 || fcntl(ctx->pipefds[i], F_SETFL, flags | O_NONBLOCK) < 0)
+            log_android(ANDROID_LOG_ERROR, "fcntl pipefds[%d] O_NONBLOCK error %d: %s", i, errno, strerror(errno));
+    }
     return (jlong) ctx;
 }
 
@@ -103,6 +110,11 @@ JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni
         // Mutex was already destroyed or not initialized, continue cleanup
     }
 
+    // A reset request that the event thread did not take anymore
+    if (ctx->reset_uids != NULL)
+        ng_free(ctx->reset_uids, __FILE__, __LINE__);
+    pthread_mutex_destroy(&ctx->reset_lock);
+
     if (ctx->pipefds[0] >= 0) close(ctx->pipefds[0]);
     if (ctx->pipefds[1] >= 0) close(ctx->pipefds[1]);
     ng_free(ctx, __FILE__, __LINE__);
@@ -121,51 +133,62 @@ Java_com_kin_athena_service_vpn_service_TunnelManager_jni_1get_1mtu(JNIEnv *env,
     return get_mtu();
 }
 
+// Wakes the event thread, which then handles pending clears and resets at the top of its loop
+static void wake_event_thread(struct context *ctx, const char *why) {
+    if (write(ctx->pipefds[1], "c", 1) < 0 && errno != EAGAIN)
+        log_android(ANDROID_LOG_ERROR, "%s wake-up error %d: %s", why, errno, strerror(errno));
+}
+
 JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni_1clear_1sessions(JNIEnv *env, jobject instance, jlong context) {
     if (context == 0) return;
 
     struct context *ctx = (struct context *) context;
     if (ctx == NULL) return;
 
-    // Lock the context to prevent race conditions during session clearing
-    long long lock_start = get_ms();
-    if (pthread_mutex_lock(&ctx->lock) != 0) {
-        log_android(ANDROID_LOG_ERROR, "Failed to lock context for session clearing");
-        return;
+    // Only record the request and return at once: the event thread clears at the top of its loop (clear_sessions),
+    // where it uses no session pointer. Freeing sessions here, on the caller's thread, would race with the event
+    // thread using them, and waiting for its lock blocked the main thread for up to a second.
+    // Several requests before the event thread runs are one clear.
+    if (!__atomic_load_n(&ctx->clear_pending, __ATOMIC_ACQUIRE))
+        __atomic_store_n(&ctx->clear_requested, get_ms(), __ATOMIC_RELEASE);
+    __atomic_store_n(&ctx->clear_pending, 1, __ATOMIC_RELEASE);
+    log_android(ANDROID_LOG_INFO, "Clear of all sessions requested, the event thread clears them");
+    wake_event_thread(ctx, "Clear sessions");
+}
+
+JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni_1reset_1sessions(JNIEnv *env, jobject instance, jlong context, jintArray uids_) {
+    if (context == 0 || uids_ == NULL) return;
+
+    struct context *ctx = (struct context *) context;
+    if (ctx == NULL) return;
+
+    jsize count = (*env)->GetArrayLength(env, uids_);
+    if (count <= 0) return;
+    jint *uids = (*env)->GetIntArrayElements(env, uids_, NULL);
+    if (uids == NULL) return;
+
+    // Like jni_clear_sessions, only record the uids: the event thread resets their TCP sessions (reset_uid_sessions).
+    // A request that is still pending is merged with this one.
+    if (pthread_mutex_lock(&ctx->reset_lock) == 0) {
+        jint *merged = ng_malloc((ctx->reset_count + count) * sizeof(jint), "reset uids");
+        if (ctx->reset_uids != NULL) {
+            memcpy(merged, ctx->reset_uids, ctx->reset_count * sizeof(jint));
+            ng_free(ctx->reset_uids, __FILE__, __LINE__);
+        } else {
+            ctx->reset_count = 0;
+            ctx->reset_requested = get_ms();
+        }
+        memcpy(merged + ctx->reset_count, uids, count * sizeof(jint));
+        ctx->reset_uids = merged;
+        ctx->reset_count += count;
+        pthread_mutex_unlock(&ctx->reset_lock);
+        log_android(ANDROID_LOG_INFO, "Reset of the TCP sessions of %d uids requested, the event thread resets them", (int) count);
+        wake_event_thread(ctx, "Reset sessions");
+    } else {
+        log_android(ANDROID_LOG_ERROR, "Failed to lock the reset request");
     }
-    long long locked_at = get_ms();
 
-    // Tell the apps their connections are gone before freeing them. Without an RST an idle connection
-    // (push, chat) still looks alive to the app and hangs until the app itself sends something, which for
-    // Play services' push connection is its next heartbeat, often 10+ minutes after a network change.
-    // Sessions still in LISTEN are left alone: the app retransmits the SYN and gets a new session.
-    int reset = 0;
-    if (current_tun_fd >= 0) {
-        struct arguments rst_args = {.env = env, .instance = instance, .tun = current_tun_fd, .ctx = ctx};
-        for (struct ng_session *s = ctx->ng_session; s != NULL; s = s->next)
-            if (s->protocol == IPPROTO_TCP && s->tcp.state != TCP_LISTEN &&
-                s->tcp.state != TCP_CLOSING && s->tcp.state != TCP_CLOSE) {
-                write_rst(&rst_args, &s->tcp);
-                reset++;
-            }
-    }
-    log_android(ANDROID_LOG_INFO, "Clearing all active sessions, reset %d TCP connections", reset);
-
-    int sessions = 0;
-    for (struct ng_session *s = ctx->ng_session; s != NULL; s = s->next)
-        sessions++;
-
-    // Clear all sessions
-    clear(ctx);
-
-    // The event thread handles packets under this lock, so a long hold stalls all traffic
-    log_android(ANDROID_LOG_INFO, "All sessions cleared successfully, freed %d sessions, waited %lld ms for the lock and held it %lld ms",
-                sessions, locked_at - lock_start, get_ms() - locked_at);
-
-    // Unlock the context
-    if (pthread_mutex_unlock(&ctx->lock) != 0) {
-        log_android(ANDROID_LOG_ERROR, "Failed to unlock context after session clearing");
-    }
+    (*env)->ReleaseIntArrayElements(env, uids_, uids, JNI_ABORT);
 }
 
 JNIEXPORT void JNICALL Java_com_kin_athena_service_vpn_service_TunnelManager_jni_1set_1dns_1servers(JNIEnv *env, jobject instance, jlong context, jstring dnsV4, jstring dnsV6) {
@@ -304,26 +327,27 @@ void log_packet_hex(const struct arguments *args, const uint8_t *data, size_t le
     (*env)->DeleteLocalRef(env, cls);
 }
 
-jboolean filter_tcp_packet(const struct arguments *args, const uint8_t *data, size_t length, const char *direction) {
+// Returns TCP_FILTER_DROP if the packet is dropped, otherwise the uid that owns the connection (-1 if unknown)
+jint filter_tcp_packet(const struct arguments *args, const uint8_t *data, size_t length, const char *direction) {
     if (args == NULL || args->env == NULL || args->instance == NULL || data == NULL) {
-        return JNI_TRUE; // Allow packet if arguments are invalid
+        return -1; // Allow packet if arguments are invalid, owner unknown
     }
     
     JNIEnv *env = args->env;
     
     jclass cls = (*env)->GetObjectClass(env, args->instance);
-    if (cls == NULL) return JNI_TRUE;
+    if (cls == NULL) return -1;
     
-    jmethodID methodID = (*env)->GetMethodID(env, cls, "onTcpPacketReceived", "([BILjava/lang/String;)Z");
+    jmethodID methodID = (*env)->GetMethodID(env, cls, "onTcpPacketReceived", "([BILjava/lang/String;)I");
     if (methodID == NULL) {
         (*env)->DeleteLocalRef(env, cls);
-        return JNI_TRUE;
+        return -1;
     }
     
     jbyteArray dataArray = (*env)->NewByteArray(env, (jsize)length);
     if (dataArray == NULL) {
         (*env)->DeleteLocalRef(env, cls);
-        return JNI_TRUE;
+        return -1;
     }
     
     (*env)->SetByteArrayRegion(env, dataArray, 0, (jsize)length, (const jbyte*)data);
@@ -332,10 +356,10 @@ jboolean filter_tcp_packet(const struct arguments *args, const uint8_t *data, si
     if (directionStr == NULL) {
         (*env)->DeleteLocalRef(env, dataArray);
         (*env)->DeleteLocalRef(env, cls);
-        return JNI_TRUE;
+        return -1;
     }
     
-    jboolean result = (*env)->CallBooleanMethod(env, args->instance, methodID, dataArray, (jint)length, directionStr);
+    jint result = (*env)->CallIntMethod(env, args->instance, methodID, dataArray, (jint)length, directionStr);
     
     (*env)->DeleteLocalRef(env, dataArray);
     (*env)->DeleteLocalRef(env, directionStr);
