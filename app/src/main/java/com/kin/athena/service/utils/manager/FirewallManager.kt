@@ -91,6 +91,11 @@ class FirewallManager @Inject constructor(
 
     private var isServiceBound: Boolean = false
 
+    // The running VpnConnectionServer, from its binder. The injected vpnService is a plain object made by
+    // FirewallModule, not the Service: it has no tunnel, so a rule change sent to it could not reset anything.
+    @Volatile
+    private var boundVpnServer: VpnConnectionServer? = null
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(className: ComponentName, service: IBinder) {
             Logger.debug { "[Fw] Bound to ${className.shortClassName} mode=${firewallStateManager.mode}" }
@@ -99,11 +104,13 @@ class FirewallManager @Inject constructor(
                 FirewallMode.VPN -> vpnService
                 FirewallMode.SHIZUKU -> shizukuService
             }
+            boundVpnServer = (service as? VpnConnectionServer.VpnConnection)?.service
             isServiceBound = true
         }
 
         override fun onServiceDisconnected(componentName: ComponentName) {
             Logger.debug { "[Fw] Service ${componentName.shortClassName} disconnected (process died?)" }
+            boundVpnServer = null
             isServiceBound = false
         }
     }
@@ -154,6 +161,7 @@ class FirewallManager @Inject constructor(
         Logger.debug { "[Fw] unbindService bound=$isServiceBound" }
         if (isServiceBound) {
             context.unbindService(serviceConnection)
+            boundVpnServer = null
             isServiceBound = false
         }
     }
@@ -161,7 +169,9 @@ class FirewallManager @Inject constructor(
     fun updateFirewallRules(application: Application?) {
         Logger.debug { "[Fw] updateFirewallRules ${application?.packageID ?: "all"} bound=$isServiceBound by ${Logger.caller()}" }
         if (isServiceBound) {
-            currentService.value?.updateRules(application) ?: Logger.warn("Cannot update rules: Service is not bound.")
+            // In VPN mode the running server reloads the rules and then resets the changed app's connections
+            val service = if (firewallStateManager.mode == FirewallMode.VPN) boundVpnServer ?: currentService.value else currentService.value
+            service?.updateRules(application) ?: Logger.warn("Cannot update rules: Service is not bound.")
         } else {
             Logger.warn("Cannot update rules: Service is not bound.")
         }
