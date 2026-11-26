@@ -39,7 +39,8 @@ object Logger {
     val isDebug: Boolean
         get() = BuildConfig.DEBUG
 
-    private var currentLogLevel: LogLevel = LogLevel.DEBUG
+    // Release builds keep only warnings and errors
+    private var currentLogLevel: LogLevel = if (BuildConfig.DEBUG) LogLevel.DEBUG else LogLevel.WARN
 
     /** Debug builds only. Prefer the lambda overload, which does not build the message in release builds. */
     fun debug(message: String) {

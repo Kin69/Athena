@@ -332,8 +332,8 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
         launch(Dispatchers.IO) { ruleManager.updateAppRules() }
         
         // Start Tunnel Manager VPN processing. The native engine logs everything in debug builds; release builds keep
-        // its info, warnings and errors. Both stay below ANDROID_LOG_WARN, which also turns on the IPv4 checksum check.
-        val logLevel = if (BuildConfig.DEBUG) Log.VERBOSE else Log.INFO
+        // only warnings and errors. Below ANDROID_LOG_WARN it also checks IPv4 header checksums, as NetGuard does in debug.
+        val logLevel = if (BuildConfig.DEBUG) Log.VERBOSE else Log.WARN
         tunnelManager.start(logLevel)
         
         netGuardJob = launch(Dispatchers.IO) {
