@@ -49,6 +49,12 @@ class TunnelManager(
     private var isReleased = false
     private val packetLogThrottle = Logger.Throttle()
 
+    /**
+     * Told on the tunnel thread when a DNS query that the engine forwarded at sentAt (SystemClock.uptimeMillis)
+     * got no answer (answered false), or when answers come again after that (answered true).
+     */
+    @Volatile
+    var upstreamDnsListener: ((answered: Boolean, sentAt: Long) -> Unit)? = null
 
 
     fun initialize(): Boolean {
@@ -158,6 +164,15 @@ class TunnelManager(
             } catch (e: Exception) {
                 Logger.error("Error in resetSessions: ${e.message}", e)
             }
+        }
+    }
+
+    // Called by the native engine on the tunnel thread, see upstreamDnsListener
+    private fun onUpstreamDns(answered: Boolean, sentAt: Long) {
+        try {
+            upstreamDnsListener?.invoke(answered, sentAt)
+        } catch (e: Exception) {
+            Logger.error("Error handling the upstream DNS state: ${e.message}", e)
         }
     }
 

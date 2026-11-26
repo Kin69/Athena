@@ -227,6 +227,12 @@ void *handle_events(void *a) {
                             int stimeout = s->udp.time + get_udp_timeout(&s->udp, sessions, maxsessions) - now + 1;
                             if (stimeout > 0 && stimeout < timeout)
                                 timeout = stimeout;
+                            // Wake up in time to count a forwarded DNS query that stays unanswered
+                            if (s->udp.dns_sent > 0) {
+                                int dtimeout = (int) ((s->udp.dns_sent + DNS_ANSWER_TIMEOUT * 1000 - get_ms()) / 1000) + 1;
+                                if (dtimeout > 0 && dtimeout < timeout)
+                                    timeout = dtimeout;
+                            }
                         }
                     } else if (s->protocol == IPPROTO_TCP) {
                         del = check_tcp_session(args, s, sessions, maxsessions);

@@ -83,6 +83,11 @@ class ConnectionStateManager @Inject constructor(
     // Debug logs only: capability updates of the same network come every few seconds
     private val sameNetworkLog = Logger.Throttle()
 
+    // Forwarded DNS queries in a row without answer on the current underlying network, see onUpstreamDns
+    private var dnsUnanswered = 0
+    private var firstUnansweredAt = 0L
+    private val noConnectivityReports = HashMap<Network, Long>()
+
     fun getCurrentConnectionType(): NetworkManager.ConnectionType {
         return currentConnectionType
     }
@@ -95,6 +100,7 @@ class ConnectionStateManager @Inject constructor(
         underlyingNetwork = network
         currentConnectionType = type
         changedAt = SystemClock.uptimeMillis()
+        dnsUnanswered = 0
         Logger.debug { "[Conn] Tunnel started on default network $network ($type)" }
         if (networkCallback == null) watchDefaultNetwork()
         observer?.let { observer ->
@@ -131,6 +137,57 @@ class ConnectionStateManager @Inject constructor(
 
     fun removeUnderlyingNetworkObserver(observer: UnderlyingNetworkObserver) = onMain {
         if (this.observer === observer) this.observer = null
+    }
+
+    /**
+     * Called on the tunnel thread when a DNS query that the engine forwarded at [sentAt] (SystemClock.uptimeMillis)
+     * got no answer ([answered] false), or when answers come again ([answered] true).
+     *
+     * With a VPN, Android's own data stall detection does not see these queries (they are Athena's, not the system
+     * resolver's), so a Wi-Fi that is still associated but passes nothing stays the default network for longer.
+     * After [DNS_UNANSWERED_REPORT] unanswered queries in a row, sent on the same network within [DNS_WINDOW_MS],
+     * Android is told the network has no connectivity, so it validates it again and can move to mobile data sooner.
+     * At most once per [REPORT_INTERVAL_MS] per network.
+     */
+    fun onUpstreamDns(answered: Boolean, sentAt: Long) {
+        handler.post {
+            if (answered) {
+                if (dnsUnanswered > 0) Logger.debug { "[Conn] Forwarded DNS answered again on $underlyingNetwork after $dnsUnanswered unanswered" }
+                dnsUnanswered = 0
+                return@post
+            }
+            val network = underlyingNetwork
+            if (network == null || listener == null) {
+                Logger.debug { "[Conn] Unanswered DNS query ignored: no default network or no tunnel" }
+                return@post
+            }
+            // Sent before the network changed, so it says nothing about the current one
+            if (sentAt < changedAt) {
+                Logger.debug { "[Conn] Unanswered DNS query ignored: sent ${changedAt - sentAt} ms before the change to $network" }
+                return@post
+            }
+            if (dnsUnanswered == 0 || sentAt - firstUnansweredAt > DNS_WINDOW_MS) {
+                dnsUnanswered = 0
+                firstUnansweredAt = sentAt
+            }
+            dnsUnanswered++
+            Logger.debug { "[Conn] Forwarded DNS query got no answer on $network: $dnsUnanswered in a row within ${sentAt - firstUnansweredAt} ms" }
+            if (dnsUnanswered < DNS_UNANSWERED_REPORT) return@post
+
+            val now = SystemClock.uptimeMillis()
+            noConnectivityReports.entries.removeAll { now - it.value >= REPORT_INTERVAL_MS }
+            noConnectivityReports[network]?.let { reportedAt ->
+                Logger.debug { "[Conn] Not reporting $network again, reported ${now - reportedAt} ms ago" }
+                return@post
+            }
+            noConnectivityReports[network] = now
+            try {
+                context.getSystemService(ConnectivityManager::class.java)?.reportNetworkConnectivity(network, false)
+                Logger.debug { "[Conn] reportNetworkConnectivity($network, false): $dnsUnanswered forwarded DNS queries in a row got no answer" }
+            } catch (e: RuntimeException) {
+                Logger.error("ConnectionStateManager: Cannot report no connectivity on $network: ${e.message}", e)
+            }
+        }
     }
 
     /**
@@ -184,6 +241,7 @@ class ConnectionStateManager @Inject constructor(
         currentConnectionType = type
         underlyingNetwork = network
         changedAt = SystemClock.uptimeMillis()
+        dnsUnanswered = 0
 
         val listener = listener
         if (previous != null && previous != network && networkManager.getCapabilities(previous) == null) {
@@ -212,6 +270,7 @@ class ConnectionStateManager @Inject constructor(
         currentConnectionType = NetworkManager.ConnectionType.NONE
         underlyingNetwork = null
         changedAt = SystemClock.uptimeMillis()
+        dnsUnanswered = 0
         Logger.debug { "[Conn] onLost $network ($previousType->NONE): kind=lost, no default network now" }
         // Reset before the VPN's underlying network changes below: the apps get the RST before Android tells them
         // about the change, and reconnect right away
@@ -256,6 +315,14 @@ class ConnectionStateManager @Inject constructor(
         private fun onMainIfCurrent(block: () -> Unit) {
             onMain { if (networkCallback === this) block() }
         }
+    }
+
+    private companion object {
+        const val DNS_UNANSWERED_REPORT = 3
+        // The unanswered queries counted for one report were all sent within this time
+        const val DNS_WINDOW_MS = 15_000L
+        // At most one report per network in this time
+        const val REPORT_INTERVAL_MS = 30_000L
     }
 }
 

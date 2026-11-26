@@ -408,6 +408,27 @@ jboolean filter_udp_packet(const struct arguments *args, const uint8_t *data, si
     return result;
 }
 
+// Tells TunnelManager.onUpstreamDns that a forwarded DNS query sent at sent (get_ms) got no answer, or that answers
+// come again after unanswered queries. Event thread only.
+void report_upstream_dns(const struct arguments *args, jboolean answered, long long sent) {
+    if (args == NULL || args->env == NULL || args->instance == NULL) {
+        return;
+    }
+
+    JNIEnv *env = args->env;
+
+    jclass cls = (*env)->GetObjectClass(env, args->instance);
+    if (cls == NULL) return;
+
+    jmethodID methodID = (*env)->GetMethodID(env, cls, "onUpstreamDns", "(ZJ)V");
+    if (methodID != NULL)
+        (*env)->CallVoidMethod(env, args->instance, methodID, answered, (jlong) sent);
+    if ((*env)->ExceptionCheck(env))
+        (*env)->ExceptionClear(env);
+
+    (*env)->DeleteLocalRef(env, cls);
+}
+
 jboolean filter_icmp_packet(const struct arguments *args, const uint8_t *data, size_t length, const char *direction) {
     if (args == NULL || args->env == NULL || args->instance == NULL || data == NULL) {
         return JNI_TRUE; // Allow packet if arguments are invalid

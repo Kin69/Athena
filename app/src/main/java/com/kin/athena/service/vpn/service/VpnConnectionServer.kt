@@ -339,6 +339,7 @@ class VpnConnectionServer : Service(), CoroutineScope by MainScope(), AppChangeC
 
         // Initialize TunnelManager with the injected RuleHandler and user's DNS servers
         tunnelManager = TunnelManager(ruleManager, dnsServerV4, dnsServerV6)
+        tunnelManager.upstreamDnsListener = connectionStateManager::onUpstreamDns
         
         if (!tunnelManager.initialize()) {
             Logger.error("Failed to initialize Tunnel Manager")

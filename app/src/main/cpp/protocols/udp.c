@@ -39,6 +39,16 @@ int check_udp_session(const struct arguments *args, struct ng_session *s, int se
     }
 
     int timeout = get_udp_timeout(&s->udp, sessions, maxsessions);
+
+    // A forwarded DNS query without any answer: the DNS server is unreachable over the current network
+    if (s->udp.state == UDP_ACTIVE && s->udp.dns_sent > 0 &&
+        (get_ms() - s->udp.dns_sent >= DNS_ANSWER_TIMEOUT * 1000 || s->udp.time + timeout < now)) {
+        args->ctx->dns_unanswered++;
+        log_android(ANDROID_LOG_INFO, "Forwarded DNS query got no answer in %lld ms, %d in a row", get_ms() - s->udp.dns_sent, args->ctx->dns_unanswered);
+        report_upstream_dns(args, JNI_FALSE, s->udp.dns_sent);
+        s->udp.dns_sent = 0;
+    }
+
     if (s->udp.state == UDP_ACTIVE && s->udp.time + timeout < now) {
         s->udp.state = UDP_FINISHING;
     }
@@ -88,6 +98,14 @@ void check_udp_socket(const struct arguments *args, const struct epoll_event *ev
             s->udp.state = UDP_FINISHING;
         } else {
             s->udp.received += bytes;
+            if (s->udp.dns_forwarded) {
+                s->udp.dns_sent = 0;
+                if (args->ctx->dns_unanswered > 0) {
+                    log_android(ANDROID_LOG_INFO, "Forwarded DNS answered again after %d unanswered queries", args->ctx->dns_unanswered);
+                    args->ctx->dns_unanswered = 0;
+                    report_upstream_dns(args, JNI_TRUE, 0);
+                }
+            }
             if (write_udp(args, &s->udp, buffer, (size_t) bytes) < 0)
                 s->udp.state = UDP_FINISHING;
             else if (ntohs(s->udp.dest) == 53)
@@ -136,6 +154,8 @@ jboolean handle_udp(const struct arguments *args, const uint8_t *pkt, size_t len
         s->udp.mss = (uint16_t) (rversion == 4 ? UDP4_MAXMSG : UDP6_MAXMSG);
         s->udp.sent = 0;
         s->udp.received = 0;
+        s->udp.dns_forwarded = 0;
+        s->udp.dns_sent = 0;
 
         if (version == 4) {
             s->udp.saddr.ip4 = (__be32) ip4->saddr;
@@ -154,6 +174,8 @@ jboolean handle_udp(const struct arguments *args, const uint8_t *pkt, size_t len
                     s->udp.daddr.ip4 = htonl(0x09090909);
                     log_android(ANDROID_LOG_WARN, "Failed to parse DNS IPv4, using fallback: 9.9.9.9");
                 }
+                s->udp.dns_forwarded = 1;
+                s->udp.dns_sent = get_ms();
             }
         } else {
             memcpy(&s->udp.saddr.ip6, &ip6->ip6_src, 16);
@@ -175,6 +197,8 @@ jboolean handle_udp(const struct arguments *args, const uint8_t *pkt, size_t len
                     memcpy(&s->udp.daddr.ip6, &dns_addr6, 16);
                     log_android(ANDROID_LOG_WARN, "Failed to parse DNS IPv6, using fallback: 2620:fe::fe");
                 }
+                s->udp.dns_forwarded = 1;
+                s->udp.dns_sent = get_ms();
             }
         }
 
